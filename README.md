@@ -103,7 +103,7 @@ npm.cmd run build -- --base=/smashy_road_analog/
 
 Если имя репозитория другое, измени base на его имя. Для сайта USERNAME.github.io в корне домена base должен быть `/`.
 В репозитории открой Settings → Pages → Source: GitHub Actions. Готовый workflow находится в `.github/workflows/deploy.yml`: при push в main он выполняет npm ci, проверяет TypeScript, собирает проект с base из настроек Pages и публикует dist. Его также можно запустить вручную из вкладки Actions. В GitHub Actions на Linux используются команды npm без суффикса .cmd. Папка node_modules не загружается в GitHub; dist создаётся при сборке.
-Проект пока не опубликован: репозиторий и workflow развёртывания не создавались.
+Репозиторий: https://github.com/WexxanBest/smashy_road_analog. Адрес игры после успешного deployment: https://wexxanbest.github.io/smashy_road_analog/. GitHub Actions автоматически публикует обновления из ветки main.
 Прогресс хранится в localStorage браузера; сохранение с localhost автоматически на опубликованный адрес не переносится.
 
 Документация: [Vite: GitHub Pages](https://vite.dev/guide/static-deploy.html#github-pages), [GitHub: публикация через Actions](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site).
