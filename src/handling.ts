@@ -1,7 +1,7 @@
 /** Body-space tyre traction with four smoothly blended driving profiles. SI units. */
 export type HandlingProfileId = 'arcade' | 'balanced' | 'drift' | 'grip';
 export interface HandlingMemory { steer:number; drift:number; roll:number; pitch:number; arcade:number; driftMode:number; grip:number; }
-export interface HandlingInput { vx:number;vz:number;yaw:number;angle:number;throttle:number;steer:number;handbrake:boolean;nitro:boolean;offRoad:boolean;speedLimit:number;handling:number;mass:number;length:number;tireCondition:number;engineCondition:number;engineLevel:number;tireLevel:number;ai:boolean;profile?:HandlingProfileId;dt:number; }
+export interface HandlingInput { vx:number;vz:number;yaw:number;angle:number;throttle:number;steer:number;handbrake:boolean;nitro:boolean;offRoad:boolean;offroadCapable?:boolean;speedLimit:number;handling:number;handlingLevel?:number;mass:number;length:number;tireCondition:number;engineCondition:number;engineLevel:number;tireLevel:number;ai:boolean;profile?:HandlingProfileId;dt:number; }
 export interface HandlingOutput { vx:number;vz:number;yaw:number;forward:number;lateral:number;slip:number;steerAngle:number;roll:number;pitch:number; }
 const clamp=(x:number,a:number,b:number)=>Math.max(a,Math.min(b,x));
 const approach=(value:number,target:number,rate:number,dt:number)=>value+(target-value)*(1-Math.exp(-rate*dt));
@@ -20,7 +20,8 @@ export function stepHandling(memory:HandlingMemory,input:HandlingInput):Handling
  }
  const a=memory.arcade,d=memory.driftMode,g=memory.grip;
  const throttle=clamp(input.throttle,-1,1),condition=.5+clamp(input.tireCondition,0,100)*.005;
- memory.steer=approach(memory.steer,clamp(input.steer,-1,1),a*10+d*7.5+g*13,dt);
+ const handlingLevel=clamp(input.handlingLevel??0,0,3);
+ memory.steer=approach(memory.steer,clamp(input.steer,-1,1),(a*11.5+d*7.5+g*13)*(1+handlingLevel*.1),dt);
  const steerAngle=memory.steer*(a*.64+d*.62+g*.49)/(1+speed*(a*.05+d*.048+g*.043))*input.handling;
  const powerIntent=clamp((throttle-.25)/.75,0,1)*clamp((speed-6)/10,0,1);
  const steerIntent=clamp((Math.abs(memory.steer)-.12)/.55,0,1);
@@ -29,19 +30,20 @@ export function stepHandling(memory:HandlingMemory,input:HandlingInput):Handling
  const driftIntent=input.ai?0:Math.max(input.handbrake&&speed>2?1:0,powerSlide*(d+a*.3+g*.025));
  memory.drift=approach(memory.drift,driftIntent,driftIntent>memory.drift?6:a*5.5+d*1.7+g*8,dt);
 
- const baseGrip=a*6+d*5.3+g*16;
+ const baseGrip=a*8+d*5.3+g*16;
  const looseGrip=a*1.85+d*1.05+g*3.7;
- const surface=input.offRoad?.64:1;
+ const surface=input.offRoad?(input.offroadCapable?.88:.64):1;
  const gripRate=(baseGrip+(looseGrip-baseGrip)*memory.drift)*condition*surface*(1+input.tireLevel*.065);
  // Grip changes the velocity vector; it never commands the body to face that vector.
  // Countersteering therefore has a direct, predictable effect instead of a recovery torque.
  const nextLateral=lateral*Math.exp(-gripRate*dt);
  const lateralAccel=dt>0?(nextLateral-lateral)/dt:0;
  const wheelbase=Math.max(1.5,input.length*.68);
- const maxLateral=(a*24+d*17+g*22)*condition*(input.offRoad?.76:1)*(1+input.tireLevel*.035);
+ const maxLateral=(a*24+d*17+g*22)*condition*(input.offRoad?(input.offroadCapable?.92:.76):1)*(1+input.tireLevel*.035)*(1+handlingLevel*.05);
  const yawLimit=Math.min(input.ai?1.75:2.2,maxLateral/Math.max(5,speed)*(1+d*memory.drift*.15+(input.handbrake?.12:0)));
  const desiredYaw=clamp(forward/wheelbase*Math.tan(steerAngle),-yawLimit,yawLimit)*clamp(speed/1.5,0,1);
- let yaw=approach(input.yaw,desiredYaw,a*10.5+d*4.7+g*12,dt);
+ const straightStability=Math.abs(memory.steer)<.05&&speed>12?1.25+handlingLevel*.08:1;
+ let yaw=approach(input.yaw,desiredYaw,(a*11.5+d*4.7+g*12)*straightStability,dt);
  if(speed<.3)yaw*=Math.exp(-dt*15);
  yaw=clamp(yaw,input.ai?-1.75:-2.2,input.ai?1.75:2.2);
 

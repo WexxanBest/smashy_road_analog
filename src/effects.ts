@@ -1,4 +1,5 @@
-import { Color3, Mesh, MeshBuilder, Scene, StandardMaterial, TransformNode, Vector3, VertexBuffer } from '@babylonjs/core';
+import { Color3, Mesh, MeshBuilder, Scene, StandardMaterial, TransformNode, Vector3, VertexBuffer, VertexData, Matrix } from '@babylonjs/core';
+import { conceptBox } from './vehicle-concepts';
 
 interface Particle {
   mesh: Mesh;
@@ -146,86 +147,111 @@ export function createEffects(scene: Scene): {
   };
 }
 
-export function createHelicopter(scene: Scene): { root: TransformNode; rotor: TransformNode; dispose(): void } {
-  const root = new TransformNode('police-helicopter', scene);
-  const rotor = new TransformNode('helicopter-rotor', scene);
-  rotor.parent = root;
-  rotor.position.set(0, 1.01, -0.17);
-  const materials: StandardMaterial[] = [];
-  const parts = new Map<StandardMaterial, Mesh[]>();
-  function material(name: string, hex: string): StandardMaterial {
-    const mat = new StandardMaterial(name, scene);
-    mat.diffuseColor = Color3.FromHexString(hex);
-    mat.specularColor = new Color3(0.12, 0.14, 0.15);
-    materials.push(mat);
-    return mat;
+export interface HelicopterVisual {
+  root: TransformNode;
+  rotor: TransformNode;
+  hull: TransformNode;
+  tail: TransformNode;
+  skids: TransformNode[];
+  beginCrash(): void;
+  releaseDebris(): Mesh[];
+  dispose(): void;
+}
+
+/** Separate semantic groups survive material batching: the caller owns the crash
+ * trajectory, rotor speed and the physics/lifetime of released fragments. */
+export function createHelicopter(scene: Scene): HelicopterVisual {
+  const root=new TransformNode('police-helicopter',scene);
+  const hullGroup=new TransformNode('helicopter-hull',scene);hullGroup.parent=root;
+  const tailGroup=new TransformNode('helicopter-tail',scene);tailGroup.parent=root;tailGroup.position.set(0,.10,-1.18);
+  const rotor=new TransformNode('helicopter-main-rotor',scene);rotor.parent=root;rotor.position.set(0,1.01,-.17);
+  const skidGroups=[-1,1].map(side=>{const node=new TransformNode(side<0?'helicopter-left-skid':'helicopter-right-skid',scene);node.parent=root;node.position.set(side*.92,-.84,.03);return node;});
+  const semantic=[{node:hullGroup,id:'hull',mass:90},{node:tailGroup,id:'tail',mass:20},{node:rotor,id:'main-rotor',mass:12},{node:skidGroups[0],id:'left-skid',mass:8},{node:skidGroups[1],id:'right-skid',mass:8}];
+  const materials:StandardMaterial[]=[],weapons:Mesh[]=[];
+  const batches=new Map<TransformNode,Map<StandardMaterial,Mesh[]>>();
+  function material(name:string,hex:string):StandardMaterial {
+    const mat=new StandardMaterial(name,scene);mat.diffuseColor=Color3.FromHexString(hex);mat.specularColor=new Color3(.12,.14,.13);mat.backFaceCulling=false;materials.push(mat);return mat;
   }
-  const hull = material('helicopter-charcoal', '#38454a');
-  const trim = material('helicopter-dark-trim', '#202d33');
-  const canopy = material('helicopter-canopy', '#699ba7');
-  const stripe = material('helicopter-ivory-marking', '#e3e5d9');
-  const red = material('helicopter-warning-red', '#f27154');
-  red.emissiveColor = new Color3(0.7, 0.08, 0.015);
-  function register(mesh: Mesh, mat: StandardMaterial, parent: TransformNode = root): Mesh {
-    mesh.material = mat;
-    mesh.parent = parent;
-    mesh.isPickable = false;
-    mesh.receiveShadows = true;
-    if (parent === root) {
-      const meshes = parts.get(mat) ?? [];
-      meshes.push(mesh);
-      parts.set(mat, meshes);
-    }
-    return mesh;
+  const hull=material('helicopter-charcoal','#384640'),trim=material('helicopter-trim','#202a27'),canopy=material('helicopter-canopy','#203d42'),stripe=material('helicopter-ivory','#d9dfca'),red=material('helicopter-warning','#ed6949');
+  canopy.specularColor=new Color3(.25,.37,.35);red.emissiveColor=new Color3(.5,.06,.01);
+  function register(mesh:Mesh,mat:StandardMaterial,parent=hullGroup,batch=true):Mesh {
+    mesh.material=mat;mesh.parent=parent;mesh.isPickable=false;mesh.receiveShadows=true;
+    if(batch){let map=batches.get(parent);if(!map){map=new Map();batches.set(parent,map);}const group=map.get(mat)??[];group.push(mesh);map.set(mat,group);}return mesh;
   }
-  function box(name: string, width: number, height: number, depth: number, x: number, y: number, z: number, mat: StandardMaterial, parent: TransformNode = root): Mesh {
-    const mesh = MeshBuilder.CreateBox(name, { width, height, depth }, scene);
-    mesh.position.set(x, y, z);
-    return register(mesh, mat, parent);
+  function box(name:string,w:number,h:number,d:number,x:number,y:number,z:number,mat:StandardMaterial,parent=hullGroup,batch=true):Mesh {
+    const mesh=conceptBox(scene,name,w,h,d,.035);mesh.position.set(x,y,z);return register(mesh,mat,parent,batch);
   }
-  const body = MeshBuilder.CreateSphere('faceted-helicopter-hull', { diameter: 1, segments: 4 }, scene);
-  body.scaling.set(1.8, 1.25, 2.8);
-  register(body, hull);
-  box('cockpit-glass', 1.26, 0.66, 0.82, 0, 0.11, 0.86, canopy).rotation.x = -0.16;
-  box('windscreen-divider', 0.055, 0.7, 0.87, 0, 0.11, 0.87, hull).rotation.x = -0.16;
-  box('cockpit-brow', 1.34, 0.1, 0.93, 0, 0.46, 0.81, hull);
-  box('belly-armor', 1.1, 0.23, 1.8, 0, -0.45, -0.05, trim);
-  box('engine-cowling', 1.0, 0.38, 1.22, 0, 0.61, -0.39, hull);
-  box('tail-boom', 0.29, 0.32, 2.52, 0, 0.11, -2.3, hull).rotation.x = 0.09;
-  box('tail-fin', 0.12, 0.95, 0.74, 0, 0.45, -3.4, hull).rotation.x = -0.14;
-  box('tail-stabilizer', 1.12, 0.09, 0.46, 0, 0.12, -3.13, stripe);
-  box('short-wings', 3.1, 0.12, 0.45, 0, -0.19, -0.17, hull);
-  for (const side of [-1, 1]) {
-    box('landing-skid', 0.09, 0.09, 2.62, side * 0.93, -0.85, 0.03, trim);
-    for (const z of [-0.65, 0.67]) box('skid-strut', 0.075, 0.6, 0.075, side * 0.75, -0.58, z, trim).rotation.z = side * 0.53;
-    box('door-stripe', 0.035, 0.12, 0.95, side * 0.85, -0.05, -0.23, stripe);
-    const pod = MeshBuilder.CreateCylinder('weapon-pod', { diameter: 0.25, height: 0.95, tessellation: 8 }, scene);
-    pod.position.set(side * 1.33, -0.27, 0.1);
-    pod.rotation.x = Math.PI / 2;
-    register(pod, trim);
-    box('navigation-light', 0.1, 0.09, 0.09, side * 1.51, -0.1, -0.17, red);
+  function poly(name:string,faces:number[][][],mat:StandardMaterial,parent=hullGroup):Mesh {
+    const positions:number[]=[],indices:number[]=[],normals:number[]=[];
+    for(const face of faces){const at=positions.length/3;for(const p of face)positions.push(...p);for(let i=1;i<face.length-1;i++)indices.push(at,at+i,at+i+1);}
+    VertexData.ComputeNormals(positions,indices,normals,{useRightHandedSystem:true});const data=new VertexData();data.positions=positions;data.indices=indices;data.normals=normals;data.uvs=new Array(positions.length/3*2).fill(0);const mesh=new Mesh(name,scene);data.applyToMesh(mesh);return register(mesh,mat,parent);
   }
-  box('rotor-shaft', 0.09, 0.38, 0.09, 0, 0.87, -0.17, trim);
-  box('rotor-blade-x', 5.75, 0.035, 0.16, 0, 0, 0, trim, rotor);
-  box('rotor-blade-z', 0.16, 0.035, 5.75, 0, 0, 0, trim, rotor);
-  box('rotor-hub', 0.24, 0.11, 0.24, 0, 0.02, 0, hull, rotor);
-  box('tail-rotor-vertical', 0.035, 0.8, 0.075, 0.21, 0.39, -3.42, trim);
-  box('tail-rotor-horizontal', 0.035, 0.075, 0.8, 0.21, 0.39, -3.42, trim);
-  for (const [mat, meshes] of parts) {
-    const merged = meshes.length === 1 ? meshes[0] : Mesh.MergeMeshes(meshes, true, true, undefined, false, false);
-    if (merged) {
-      merged.parent = root;
-      merged.material = mat;
-      merged.isPickable = false;
-    }
+  // Angular fuselage with an actual sloping windscreen, not a glass box.
+  const sections=[{z:1.40,w:1.12,lo:-.25,hi:.20},{z:.50,w:1.75,lo:-.55,hi:.60},{z:-1.0,w:1.05,lo:-.35,hi:.38},{z:-1.40,w:.42,lo:-.15,hi:.20}];
+  const rings=sections.map(s=>[[-s.w/2+.10,s.lo,s.z],[s.w/2-.10,s.lo,s.z],[s.w/2,s.lo+.10,s.z],[s.w/2,s.hi-.10,s.z],[s.w/2-.10,s.hi,s.z],[-s.w/2+.10,s.hi,s.z],[-s.w/2,s.hi-.10,s.z],[-s.w/2,s.lo+.10,s.z]]);
+  const faces:number[][][]=[rings[0],rings.at(-1)!.slice().reverse()];for(let r=0;r<rings.length-1;r++)for(let i=0;i<8;i++){const j=(i+1)%8;faces.push([rings[r][i],rings[r+1][i],rings[r+1][j],rings[r][j]]);}poly('faceted-fuselage',faces,hull);
+  poly('sloped-helicopter-windscreen',[[[-.48,.02,1.42],[.48,.02,1.42],[.67,.46,.86],[-.67,.46,.86]]],canopy);
+  box('windscreen-divider',.045,.56,.055,0,.24,1.15,hull).rotation.x=-.87;
+  box('belly-armor',1.12,.19,1.75,0,-.48,-.04,trim);
+  box('engine-cowling',.94,.34,1.17,0,.66,-.40,hull);
+  const boom=MeshBuilder.CreateCylinder('tapered-tail-boom',{diameterTop:.43,diameterBottom:.15,height:2.52,tessellation:8},scene);boom.rotation.x=Math.PI/2;boom.rotation.z=.03;boom.position.set(0,.04,-1.16);register(boom,hull,tailGroup);
+  box('vertical-tail-fin',.11,.92,.68,0,.45,-2.23,hull,tailGroup).rotation.x=-.14;
+  box('tail-stabilizer',1.15,.075,.43,0,.13,-1.98,stripe,tailGroup);
+  box('tail-rotor-vertical',.035,.85,.07,.21,.40,-2.24,trim,tailGroup);
+  box('tail-rotor-horizontal',.035,.07,.85,.21,.40,-2.24,trim,tailGroup);
+  box('short-wings',3.0,.10,.43,0,-.19,-.17,hull);
+  for(const side of [-1,1]) {
+    const sideGlass=[[side*.89,-.04,.48],[side*.745,-.04,-.25],[side*.745,.35,-.25],[side*.89,.43,.48]];if(side<0)sideGlass.reverse();poly('side-canopy',[sideGlass],canopy);
+    box('door-stripe',.035,.12,.91,side*.83,-.09,-.20,stripe);
+    const pod=MeshBuilder.CreateCylinder('helicopter-weapon-pod',{diameter:.25,height:.92,tessellation:8},scene);pod.position.set(side*1.30,-.27,.10);pod.rotation.x=Math.PI/2;register(pod,trim,hullGroup,false);weapons.push(pod);
+    box('navigation-light',.11,.09,.09,side*1.46,-.10,-.17,red);
   }
-  let disposed = false;
-  return { root, rotor, dispose(): void {
-    if (disposed) return;
-    disposed = true;
-    root.dispose(false, false);
-    for (const mat of materials) mat.dispose();
-  } };
+  for(let i=0;i<2;i++) {
+    const side=i===0?-1:1,node=skidGroups[i];box('landing-skid',.09,.09,2.48,0,0,0,trim,node);
+    box('upturned-skid-tip',.09,.08,.34,0,.055,1.34,trim,node).rotation.x=-.33;
+    for(const z of [-.65,.67])box('skid-strut',.075,.60,.075,-side*.16,.28,z,trim,node).rotation.z=side*.53;
+  }
+  box('rotor-shaft',.09,.36,.09,0,.86,-.17,trim);
+  box('rotor-blade-x',5.75,.032,.15,0,0,0,trim,rotor);
+  box('rotor-blade-z',.15,.032,5.75,0,0,0,trim,rotor);
+  box('rotor-hub',.25,.10,.25,0,.03,0,hull,rotor);
+
+  // Merge inside a part, never across the tail, skids or rotor pivots.
+  for(const [parent,map] of batches)for(const [mat,meshes] of map) {
+    if(meshes.length<2)continue;parent.computeWorldMatrix(true);const inverse=parent.getWorldMatrix().clone().invert();
+    const merged=Mesh.MergeMeshes(meshes,true,true,undefined,false,false);if(!merged)continue;
+    merged.parent=null;merged.bakeTransformIntoVertices(inverse);merged.position.setAll(0);merged.rotation.setAll(0);merged.rotationQuaternion=null;merged.scaling.setAll(1);merged.parent=parent;merged.material=mat;merged.isPickable=false;merged.receiveShadows=true;merged.name='helicopter-'+parent.name+'-'+mat.name;
+  }
+  let disposed=false,crashing=false,released=false;
+  return {
+    root,rotor,hull:hullGroup,tail:tailGroup,skids:skidGroups,
+    beginCrash():void {
+      if(disposed||crashing)return;crashing=true;root.metadata={...root.metadata,crashing:true};
+      for(const weapon of weapons)weapon.setEnabled(false);
+      for(const mat of [hull,trim,stripe])Color3.LerpToRef(mat.diffuseColor,new Color3(.095,.11,.10),.42,mat.diffuseColor);
+      red.emissiveColor.setAll(0);
+    },
+    releaseDebris():Mesh[] {
+      if(disposed||released)return [];released=true;root.computeWorldMatrix(true);const debris:Mesh[]=[];
+      for(const part of semantic) {
+        const sources=part.node.getChildMeshes().filter(m=>m instanceof Mesh&&m.isEnabled()&&!m.isDisposed()) as Mesh[];
+        if(!sources.length)continue;
+        for(const source of sources)source.computeWorldMatrix(true);
+        const bounds=part.node.getHierarchyBoundingVectors(true),center=bounds.min.add(bounds.max).scale(.5),inverse=Matrix.Translation(-center.x,-center.y,-center.z),pieces:VertexData[]=[];
+        for(const source of sources) {
+          const data=VertexData.ExtractFromMesh(source,false,true);data.transform(source.getWorldMatrix().multiply(inverse));
+          const mat=source.material instanceof StandardMaterial?source.material:hull,colors=new Float32Array(source.getTotalVertices()*4);
+          for(let i=0;i<source.getTotalVertices();i++){colors[i*4]=mat.diffuseColor.r;colors[i*4+1]=mat.diffuseColor.g;colors[i*4+2]=mat.diffuseColor.b;colors[i*4+3]=1;}data.colors=colors;pieces.push(data);
+        }
+        const data=pieces[0];data.merge(pieces.slice(1),true,false,false,true);
+        const mesh=new Mesh('helicopter-debris-'+part.id,scene);data.applyToMesh(mesh);mesh.position.copyFrom(center);mesh.isPickable=false;mesh.receiveShadows=true;
+        // Each fragment owns its material, so cleanup cannot invalidate a live heli.
+        const own=new StandardMaterial('helicopter-debris-material-'+part.id,scene);own.diffuseColor=Color3.White();own.specularColor=new Color3(.06,.07,.06);own.backFaceCulling=false;mesh.material=own;mesh.metadata={helicopterDebris:true,part:part.id,debrisMass:part.mass};mesh.onDisposeObservable.addOnce(()=>own.dispose());debris.push(mesh);part.node.setEnabled(false);
+      }
+      root.setEnabled(false);return debris;
+    },
+    dispose():void {if(disposed)return;disposed=true;root.dispose(false,false);for(const mat of materials)mat.dispose();}
+  };
 }
 
 const pickupMaterials = new WeakMap<Scene, StandardMaterial>();

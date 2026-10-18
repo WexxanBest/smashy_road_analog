@@ -1,11 +1,12 @@
-import { CARS, PAINTS, UPGRADE_NAMES, carUpgrades, upgradeCost } from './types';
+import { CARS, PAINTS, UPGRADE_NAMES, CHALLENGES, TURRET_PRICE, carUpgrades, upgradeCost, challengeProgress, turretAvailable, turretCoolingCost } from './types';
 import { PICKUP_INFO } from './pickups';
-import type { GameState, SaveData, UIActions, GameUI, MapData, RadarMarker, UpgradeKey, HandlingProfileId, WeaponKind, GarageTab } from './types';
+import type { GameState, SaveData, UIActions, GameUI, MapData, RadarMarker, UpgradeKey, HandlingProfileId, WeaponKind, GarageTab, AimAssist, CheatKey, AudioChannel, CarSpec } from './types';
 
-const upgradeKeys: UpgradeKey[] = ['engine', 'armor', 'tires', 'nitro'];
+const upgradeKeys: UpgradeKey[] = ['engine', 'armor', 'tires', 'nitro', 'handling'];
 const money = (value: number) => Math.max(0, Math.floor(value)).toLocaleString('ru-RU');
 const clock = (value: number) => `${Math.floor(Math.max(0, value) / 60).toString().padStart(2, '0')}:${Math.floor(Math.max(0, value) % 60).toString().padStart(2, '0')}`;
 const percent = (value: number) => Math.min(100, Math.max(0, value));
+const paintNames: Record<string,string> = { '#fa661b':'Оранжевый', '#859c4a':'Олива', '#b54526':'Терракота', '#ded9c9':'Слоновая кость', '#8aafbf':'Лёд', '#b69ad0':'Лаванда', '#e6ef64':'Лайм', '#252d32':'Графит' };
 const biomeNames = { city: 'ГОРОД', desert: 'ПУСТЫНЯ', fields: 'ПОЛЯ' };
 const handlingDescriptions: Record<HandlingProfileId, string> = {
   arcade: 'Быстрые реакции и помощь в стабилизации. Удобная основа для погони.',
@@ -16,14 +17,29 @@ const handlingDescriptions: Record<HandlingProfileId, string> = {
 const tabLabels: Record<GarageTab, string> = { garage: 'ГАРАЖ', cars: 'АВТОМОБИЛИ', tuning: 'ТЮНИНГ', body: 'КУЗОВ' };
 const tabSubtitles: Record<GarageTab, string> = { garage: 'Подготовь машину к следующему заезду.', cars: 'Выбери машину для заезда.', tuning: 'Улучши характеристики машины.', body: 'Настрой внешний вид машины.' };
 const tabIcons = { garage: 'M2 10L12 2l10 8v12h-5v-9H7v9H2zm7 6h6v6H9z', cars: 'M5 5h14l3 8v8h-4v-3H6v3H2v-8zm1 2l-2 6h16l-2-6zM5 14v3h3v-3zm11 0v3h3v-3z', tuning: 'M14 2l-2 5 5 5 5-2-1 6-5 3-5-2-7 7-4-4 7-7-1-5 3-5z', body: 'M9 1h7v4H9zM8 6h9l3 5v11H5V11zm-5 4H0v3h3zm17-4h4v3h-4z' };
-const upgradeDescriptions: Record<UpgradeKey, string> = { engine: 'Мощность и максимальная скорость', armor: 'Прочность корпуса', tires: 'Сцепление на дороге', nitro: 'Запас и восстановление ускорения' };
+const upgradeDescriptions: Record<UpgradeKey, string> = { engine: 'Мощность и максимальная скорость', armor: 'Прочность корпуса', tires: 'Сцепление на дороге', nitro: 'Расход и восстановление ускорения', handling: 'Отклик руля и устойчивость в повороте' };
+const assistOptions = '<option value="off">Выключена · точное наведение</option><option value="weak">Слабая · небольшая помощь</option><option value="standard">Стандартная · удобный захват</option>';
+const cheatLabels: Record<CheatKey, string> = { invincible: 'Бессмертие', unlimitedNitro: 'Бесконечное нитро', unlimitedAmmo: 'Бесконечные ракеты и гранаты', noOverheat: 'Турель без перегрева' };
+function challengeCards() {
+  return `<div class="dl-challenges">${CHALLENGES.map(challenge => `<article class="dl-challenge" data-challenge="${challenge.id}"><div><span>${challenge.difficulty}</span><b>${CARS.find(car => car.id === challenge.carId)?.name || challenge.carId}</b></div><h3>${challenge.title}</h3><p>${challenge.description}</p><progress max="${challenge.target}" value="0" aria-label="${challenge.title}: прогресс"></progress><small data-challenge-progress>0 / ${challenge.target}</small></article>`).join('')}</div>`;
+}
+function upgradeEffect(spec: CarSpec, key: UpgradeKey, level: number) {
+  const next = Math.min(3, level + 1), pair = (a: string, b: string) => level >= 3 ? a : `${a} → ${b}`;
+  switch (key) {
+    case 'engine': return `Предел скорости: ${pair(`${Math.round(spec.speed * (1 + level * .085) * 3.6)}`, `${Math.round(spec.speed * (1 + next * .085) * 3.6)}`)} км/ч при исправном моторе. Мощность: ${pair(`+${level * 10}%`, `+${next * 10}%`)}.`;
+    case 'armor': return `Прочность: ${pair(`${spec.armor + level * 30}`, `${spec.armor + next * 30}`)} HP.`;
+    case 'tires': return `Сцепление: ${pair(`+${(level * 6.5).toLocaleString('ru-RU')}%`, `+${(next * 6.5).toLocaleString('ru-RU')}%`)}.`;
+    case 'nitro': return `Расход: ${pair(`${31 - level * 4}`, `${31 - next * 4}`)} /с. Восстановление: ${pair(`${7 + level * 2}`, `${7 + next * 2}`)} /с.`;
+    case 'handling': return `Отклик руля: ${pair(`+${level * 10}%`, `+${next * 10}%`)}. Устойчивость: ${pair(`+${level * 5}%`, `+${next * 5}%`)}.`;
+  }
+}
 function drivingControls(scope: string) {
-  return `<div class="dl-driving-controls"><span class="dl-test-kicker">НАСТРОЙКИ ЗАЕЗДА</span><label for="${scope}-handling">Характер машины</label><select id="${scope}-handling" data-setting="handling"><option value="arcade">Аркада · рекомендуется</option><option value="balanced">Баланс · плавно и устойчиво</option><option value="drift">Дрифт · больше заноса</option><option value="grip">Сцепление · точнее повороты</option></select><p data-handling-description>${handlingDescriptions.arcade}</p><label for="${scope}-traffic">Сторона движения</label><select id="${scope}-traffic" data-setting="traffic"><option value="right">Правостороннее</option><option value="left">Левостороннее</option></select><p>Выбери, по какой стороне дороги едет трафик.</p><label>Преследование</label><button type="button" class="dl-pursuit-toggle" data-action="pursuit" data-pursuit-toggle aria-pressed="true">ПОЛИЦИЯ ВКЛЮЧЕНА</button><p>Отключи полицию, чтобы спокойно сравнить управление и проверить оружие.</p><label>Оружие на ЛКМ</label><div class="dl-weapon-switch"><button type="button" data-action="weapon" data-weapon="turret" aria-pressed="true" title="Турель — клавиша 1">1 Турель <small>∞</small></button><button type="button" data-action="weapon" data-weapon="rocket" aria-pressed="false" title="Ракеты — клавиша 2">2 Ракеты <small data-rocket-count>0</small></button></div><p>1 — турель, 2 — ракеты. Мышь — прицел; ЛКМ — выстрел по цели; ПКМ — гранатомёт.</p><label>Музыка</label><button type="button" class="dl-settings-music" data-action="music" data-music-toggle>МУЗЫКА ВКЛЮЧЕНА</button><details class="dl-settings-details"><summary>Состояние и контракт</summary><div class="dl-settings-readings"><div><span>Кузов</span><b data-health-detail="hull">100%</b></div><div><span>Двигатель</span><b data-health-detail="engine">100%</b></div><div><span>Шины</span><b data-health-detail="tires">100%</b></div></div><p data-objective-summary>Контракт появится во время заезда.</p></details><p class="dl-full-controls">WASD — газ, тормоз и руль. Shift — нитро. Space — ручник. G — гараж рядом, когда погоня закончена. Tab — полная карта. Esc — пауза. M — музыка.</p></div>`;
+  return `<div class="dl-driving-controls"><span class="dl-test-kicker">НАСТРОЙКИ ЗАЕЗДА</span><label for="${scope}-handling">Характер машины</label><select id="${scope}-handling" data-setting="handling"><option value="arcade">Аркада · рекомендуется</option><option value="balanced">Баланс · плавно и устойчиво</option><option value="drift">Дрифт · больше заноса</option><option value="grip">Сцепление · точнее повороты</option></select><p data-handling-description>${handlingDescriptions.arcade}</p><label for="${scope}-traffic">Сторона движения</label><select id="${scope}-traffic" data-setting="traffic"><option value="right">Правостороннее</option><option value="left">Левостороннее</option></select><label>Преследование</label><button type="button" class="dl-pursuit-toggle" data-action="pursuit" data-pursuit-toggle aria-pressed="true">ПОЛИЦИЯ ВКЛЮЧЕНА</button><label>Оружие на ЛКМ</label><div class="dl-weapon-switch"><button type="button" data-action="weapon" data-weapon="turret" aria-pressed="true" title="Турель — клавиша 1">1 Турель <small>∞</small></button><button type="button" data-action="weapon" data-weapon="rocket" aria-pressed="false" title="Ракеты — клавиша 2">2 Ракеты <small data-rocket-count>0</small></button></div><p>Турель покупается и устанавливается в тюнинге. 1 / 2 — выбор оружия. Ракеты при подборе пополняют запас.</p><details class="dl-settings-details" open><summary>Помощь прицеливания</summary><label for="${scope}-turret-assist">Турель</label><select id="${scope}-turret-assist" data-setting="assist" data-weapon="turret">${assistOptions}</select><label for="${scope}-rocket-assist">Ракеты</label><select id="${scope}-rocket-assist" data-setting="assist" data-weapon="rocket">${assistOptions}</select><p>Меняет помощь при выборе цели. Выпущенная ракета продолжает самонаведение.</p></details><details class="dl-settings-details"><summary>Звук</summary><button type="button" class="dl-settings-music" data-action="music" data-music-toggle>МУЗЫКА ВКЛЮЧЕНА</button>${(['music','sfx','engine'] as const).map(channel => `<label class="dl-volume-label" for="${scope}-${channel}">${{music:'Музыка',sfx:'Выстрелы и эффекты',engine:'Двигатель'}[channel]}<output data-volume-label="${channel}">70%</output></label><input id="${scope}-${channel}" type="range" min="0" max="100" step="5" data-setting="volume" data-channel="${channel}" aria-label="Громкость: ${{music:'музыка',sfx:'эффекты',engine:'двигатель'}[channel]}">`).join('')}<p>Музыка меняется при погоне и после отрыва. Громкость эффектов и двигателя настраивается отдельно.</p></details><details class="dl-settings-details"><summary>Песочница</summary><button type="button" class="dl-pursuit-toggle" data-action="sandbox" data-sandbox-toggle aria-pressed="false">ВКЛЮЧИТЬ ПЕСОЧНИЦУ</button><p>Свободный режим для экспериментов. Прогресс заданий и рекорды в нём не засчитываются.</p><fieldset class="dl-cheats" data-sandbox-options disabled><legend>Возможности</legend>${(Object.keys(cheatLabels) as CheatKey[]).map(key => `<label class="dl-check"><input type="checkbox" data-setting="cheat" data-cheat="${key}"><span>${cheatLabels[key]}</span></label>`).join('')}<label for="${scope}-wanted">Уровень розыска</label><select id="${scope}-wanted" data-setting="wanted"><option value="-1">Обычный розыск</option>${Array.from({length:6},(_,level)=>`<option value="${level}">${level === 0 ? '0 · без розыска' : `${level} ${'★'.repeat(level)}`}</option>`).join('')}</select></fieldset></details><details class="dl-settings-details"><summary>Задания · открытие машин</summary>${challengeCards()}</details><details class="dl-settings-details"><summary>Состояние и контракт</summary><div class="dl-settings-readings"><div><span>Кузов</span><b data-health-detail="hull">100%</b></div><div><span>Двигатель</span><b data-health-detail="engine">100%</b></div><div><span>Шины</span><b data-health-detail="tires">100%</b></div></div><p data-objective-summary>Контракт появится во время заезда.</p></details><p class="dl-full-controls">WASD — газ, тормоз и руль. Shift — нитро. Space — ручник. G — гараж рядом, когда погоня закончена. Tab — полная карта. Esc — пауза. M — музыка.</p></div>`;
 }
 function pickupLegend() {
   const names = { cash: 'Монеты', repair: 'Красный ремкомплект с крестом', ammo: 'Гранаты', nitro: 'Синий баллон', rocket: 'Ракетница' };
   const icons = { cash: '●', repair: '✚', ammo: '▥', nitro: '▰', rocket: '➤' };
-  return `<details class="dl-pickup-legend"><summary>ПРЕДМЕТЫ НА ДОРОГЕ <span>5 типов</span></summary><div>${(['cash', 'repair', 'ammo', 'nitro', 'rocket'] as const).map(kind => `<div class="dl-pickup-row"><i class="dl-pickup-icon" style="--pickup-color:${PICKUP_INFO[kind].color}" aria-hidden="true">${icons[kind]}</i><div><b>${names[kind]}</b><span>${kind === 'rocket' ? `${PICKUP_INFO[kind].label} · выбирается автоматически` : PICKUP_INFO[kind].message}</span></div></div>`).join('')}</div></details>`;
+  return `<details class="dl-pickup-legend"><summary>ПРЕДМЕТЫ НА ДОРОГЕ <span>5 типов</span></summary><div>${(['cash', 'repair', 'ammo', 'nitro', 'rocket'] as const).map(kind => `<div class="dl-pickup-row"><i class="dl-pickup-icon" style="--pickup-color:${PICKUP_INFO[kind].color}" aria-hidden="true">${icons[kind]}</i><div><b>${names[kind]}</b><span>${kind === 'rocket' ? `${PICKUP_INFO[kind].label} · нажми 2 для выбора` : PICKUP_INFO[kind].message}</span></div></div>`).join('')}</div></details>`;
 }
 
 export function createUI(container: HTMLElement, actions: UIActions): GameUI {
@@ -34,7 +50,7 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
   root.innerHTML = `
     <header class="dl-header">
       <div class="dl-brand"><span class="dl-brand-symbol" aria-hidden="true"><i></i><i></i><i></i></span><div>DUSTLINE<span class="dl-brand-caption">ЕЗЖАЙ. РИСКУЙ. ИСЧЕЗАЙ.</span></div></div>
-      <div class="dl-header-tools"><span class="dl-local"><i></i> LOCAL <span>/ СОЛО</span></span><button class="dl-sound" type="button" data-action="music" aria-label="Выключить музыку"><span class="dl-sound-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span data-ui="musicLabel">ЗВУК ВКЛ</span></button></div>
+      <div class="dl-header-tools"><div class="dl-wallet-compact" aria-label="Баланс"><span>БАЛАНС</span><b data-ui="compactCredits">800</b><span>$</span></div><button class="dl-garage-settings" type="button" data-action="settingmodal" aria-label="Настройки игры">⚙</button><span class="dl-local"><i></i> LOCAL <span>/ СОЛО</span></span><button class="dl-sound" type="button" data-action="music" aria-label="Выключить музыку"><span class="dl-sound-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span data-ui="musicLabel">МУЗЫКА ВКЛ</span></button></div>
     </header>
     <section class="dl-garage" data-ui="garage" aria-label="Гараж">
       <nav class="dl-garage-nav" aria-label="Разделы гаража">${(['garage','cars','tuning','body'] as const).map(tab => `<button type="button" data-action="tab" data-tab="${tab}" class="${tab === 'garage' ? 'is-active' : ''}" aria-pressed="${tab === 'garage'}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${tabIcons[tab]}"/></svg>${tabLabels[tab]}</button>`).join('')}</nav>
@@ -53,8 +69,8 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
           <button type="button" class="dl-launch" data-ui="launch" data-action="start"><span data-ui="launchLabel">НА ДОРОГУ</span><span aria-hidden="true">↗</span></button>
           <p class="dl-launch-note" data-ui="launchNote">Погоня начинается с первого поворота.</p>
         </div>
-        <div class="dl-panel-section dl-upgrade-section" data-panel="tuning"><div class="dl-upgrades">${upgradeKeys.map(key => `<button class="dl-upgrade" type="button" data-action="upgrade" data-key="${key}"><span class="dl-upgrade-symbol" aria-hidden="true">${{engine:'⚙',armor:'⬡',tires:'◉',nitro:'ϟ'}[key]}</span><span class="dl-upgrade-main"><span class="dl-upgrade-name">${UPGRADE_NAMES[key]}</span><span class="dl-upgrade-tier" data-level-label="${key}">УРОВЕНЬ 0 / 3</span><span class="dl-upgrade-level" data-level="${key}"><i></i><i></i><i></i></span><span class="dl-upgrade-description">${upgradeDescriptions[key]}</span></span><span class="dl-upgrade-price" data-price="${key}"></span><span class="dl-upgrade-add" aria-hidden="true">+</span></button>`).join('')}</div><p class="dl-panel-hint">Нажми на улучшение, чтобы установить его. Максимум — три уровня.</p></div>
-        <div class="dl-panel-section dl-body-panel" data-panel="body"><div class="dl-section-title"><span>ОСНОВНОЙ ЦВЕТ</span><b data-ui="paintLabel">ЛАЙМ</b></div><div class="dl-swatches">${PAINTS.map((paint, index) => `<button type="button" data-action="paint" data-color="${paint}" style="--paint:${paint}" aria-label="${['Лайм', 'Терракота', 'Лёд', 'Слоновая кость', 'Лаванда', 'Графит'][index]}"></button>`).join('')}</div><p class="dl-panel-hint">Покраска применяется сразу и сохраняется для этой машины.</p><button type="button" class="dl-body-done" data-action="tab" data-tab="garage">ГОТОВО <span>↗</span></button></div>
+        <div class="dl-garage-challenges" data-panel="cars"><h2>ОТКРОЙ НОВЫЕ МАШИНЫ</h2><p>Награды за задания сохраняются в твоём гараже.</p>${challengeCards()}</div><div class="dl-panel-section dl-upgrade-section" data-panel="tuning"><div class="dl-upgrades">${upgradeKeys.map(key => `<button class="dl-upgrade" type="button" data-action="upgrade" data-key="${key}"><span class="dl-upgrade-symbol" aria-hidden="true">${{engine:'⚙',armor:'⬡',tires:'◉',nitro:'ϟ',handling:'↗'}[key]}</span><span class="dl-upgrade-main"><span class="dl-upgrade-name">${UPGRADE_NAMES[key]}</span><span class="dl-upgrade-tier" data-level-label="${key}">УРОВЕНЬ 0 / 3</span><span class="dl-upgrade-level" data-level="${key}"><i></i><i></i><i></i></span><span class="dl-upgrade-description">${upgradeDescriptions[key]}</span><span class="dl-upgrade-effect" data-upgrade-effect="${key}"></span></span><span class="dl-upgrade-price" data-price="${key}"></span><span class="dl-upgrade-add" aria-hidden="true">+</span></button>`).join('')}</div><p class="dl-panel-hint">Улучшения устанавливаются на выбранную машину. Максимум — три уровня.</p><section class="dl-equipment" aria-label="Вооружение"><h2>ВООРУЖЕНИЕ</h2><p data-ui="turretOwnership">Турель доступна после покупки.</p><button type="button" class="dl-equipment-buy" data-ui="turretBuy" data-action="buyTurret">КУПИТЬ ТУРЕЛЬ · ${money(TURRET_PRICE)} $</button><button type="button" class="dl-equipment-install" data-ui="turretInstall" data-action="toggleTurret" aria-pressed="false" hidden>УСТАНОВИТЬ НА ЭТУ МАШИНУ</button><p>Одна покупка для всех твоих машин. Установка на каждую машину бесплатна.</p><button type="button" class="dl-equipment-cooling" data-ui="turretUpgrade" data-action="upgradeTurret"><span>ОХЛАЖДЕНИЕ ТУРЕЛИ</span><b data-ui="turretUpgradePrice"></b><small data-ui="turretUpgradeEffect"></small></button><p>Общее улучшение для всех установленных турелей. Ускоряет охлаждение после стрельбы.</p></section></div>
+        <div class="dl-panel-section dl-body-panel" data-panel="body"><div class="dl-section-title"><span>ОСНОВНОЙ ЦВЕТ</span><b data-ui="paintLabel">ЛАЙМ</b></div><div class="dl-swatches">${PAINTS.map((paint, index) => `<button type="button" data-action="paint" data-color="${paint}" style="--paint:${paint}" aria-label="${paintNames[paint] || `Цвет ${index + 1}`}"></button>`).join('')}</div><p class="dl-panel-hint">Покраска применяется сразу и сохраняется для этой машины.</p><button type="button" class="dl-body-done" data-action="tab" data-tab="garage">ГОТОВО <span>↗</span></button></div>
       </div>
       <div class="dl-garage-notice" data-ui="garageNotice" role="status" hidden></div>
       <aside class="dl-garage-panel">
@@ -81,6 +97,7 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
     </section>
     <div class="dl-modal-backdrop" data-ui="pause" hidden><section class="dl-modal dl-pause-modal" aria-labelledby="dl-pause-title"><span class="dl-eyebrow">ВРЕМЯ ПЕРЕВЕСТИ ДУХ</span><h2 id="dl-pause-title">ПАУЗА.</h2><p>Твоя дорога подождёт.</p><div class="dl-pause-controls"><div><kbd>W A S D</kbd><span>Газ, тормоз и руль</span></div><div><kbd>МЫШЬ</kbd><span>Прицел оружия</span></div><div><kbd>ЛКМ / ПКМ</kbd><span>Оружие / гранатомёт</span></div><div><kbd>SHIFT</kbd><span>Нитро</span></div><div><kbd>SPACE</kbd><span>Ручник</span></div><div><kbd>G</kbd><span>Въехать в гараж без хвоста</span></div></div><div class="dl-pause-settings">${drivingControls('pause')}${pickupLegend()}</div><button class="dl-primary" type="button" data-action="resume">ПРОДОЛЖИТЬ <span>↗</span></button><button class="dl-secondary dl-pause-garage" type="button" data-ui="pauseGarage" data-action="garage" disabled>ДОБЕРИСЬ ДО ГАРАЖА НА МИНИ-КАРТЕ</button><button class="dl-secondary" type="button" data-action="restart">НОВЫЙ ЗАЕЗД</button></section></div>
     <div class="dl-modal-backdrop" data-ui="gameover" hidden><section class="dl-modal dl-results" aria-labelledby="dl-result-title"><span class="dl-eyebrow">ПОГОНЯ ЗАКОНЧЕНА</span><h2 id="dl-result-title">ДОЕЗДИЛИСЬ.</h2><p>Каждый след на кузове — своя история.</p><div class="dl-result-stats"><div><span>ВРЕМЯ</span><strong data-ui="resultTime">00:00</strong></div><div><span>РЕКОРД</span><strong data-ui="resultBest">00:00</strong></div><div><span>ЗАРАБОТАНО</span><strong class="dl-acid"><span data-ui="resultEarned">0</span><small> $</small></strong></div><div><span>ВЫВЕДЕНО ИЗ СТРОЯ</span><strong data-ui="resultKills">0</strong></div></div><p class="dl-result-note">После аварии сохраняется половина добычи.</p><button class="dl-primary" type="button" data-action="restart">ЕЩЁ ОДИН ЗАЕЗД <span>↗</span></button><button class="dl-secondary" type="button" data-action="garage">В ГАРАЖ</button></section></div>
+    <div class="dl-modal-backdrop" data-ui="garageSettings" hidden><section class="dl-modal dl-garage-settings-modal" role="dialog" aria-modal="true" aria-labelledby="dl-garage-settings-title"><button class="dl-test-close" type="button" data-action="settingmodal" aria-label="Закрыть настройки">×</button><h2 id="dl-garage-settings-title">НАСТРОЙКИ</h2>${drivingControls("garage")}<button class="dl-primary" type="button" data-action="settingmodal">ГОТОВО <span>↗</span></button></section></div>
     <div class="dl-mobile-warning">Для полного контроля используй клавиатуру и мышь.</div>
   `;
   container.append(root);
@@ -101,6 +118,14 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
   const healthDetails = Array.from(root.querySelectorAll<HTMLElement>('[data-health-detail]'));
   const objectiveSummaries = Array.from(root.querySelectorAll<HTMLElement>('[data-objective-summary]'));
   const componentRows = Array.from(root.querySelectorAll<HTMLElement>('[data-component]'));
+  const assistSelects = Array.from(root.querySelectorAll<HTMLSelectElement>('[data-setting="assist"]'));
+  const wantedSelects = Array.from(root.querySelectorAll<HTMLSelectElement>('[data-setting="wanted"]'));
+  const cheatInputs = Array.from(root.querySelectorAll<HTMLInputElement>('[data-setting="cheat"]'));
+  const sandboxOptions = Array.from(root.querySelectorAll<HTMLFieldSetElement>('[data-sandbox-options]'));
+  const sandboxToggles = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-sandbox-toggle]'));
+  const volumeInputs = Array.from(root.querySelectorAll<HTMLInputElement>('[data-setting="volume"]'));
+  const volumeOutputs = Array.from(root.querySelectorAll<HTMLOutputElement>('[data-volume-label]'));
+  const challengeEls = Array.from(root.querySelectorAll<HTMLElement>('[data-challenge]'));
   let selectedId = CARS[0].id;
   let garageSignature = '';
   let lastMode = '';
@@ -122,28 +147,46 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
     for (const button of garageTabs) { const active = button.dataset.tab === tab; button.classList.toggle('is-active', active); button.setAttribute('aria-pressed', String(active)); }
     actions.garageTab(tab);
   };
+  const toggleGarageSettings = () => {
+    els.garageSettings.hidden = !els.garageSettings.hidden;
+    const focus = els.garageSettings.hidden ? root.querySelector<HTMLButtonElement>('.dl-garage-settings') : els.garageSettings.querySelector<HTMLButtonElement>('[data-action="settingmodal"]');
+    focus?.focus();
+  };
+  const focusGame = () => {
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    const gameCanvas = document.querySelector<HTMLCanvasElement>('#game');
+    if (gameCanvas) { gameCanvas.tabIndex = -1; gameCanvas.focus({ preventScroll: true }); }
+  };
   const click = (event: MouseEvent) => {
+    if (event.target === els.garageSettings) { toggleGarageSettings(); return; }
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button[data-action]') : null;
     if (!target || target.disabled) return;
     switch (target.dataset.action) {
-      case 'start': actions.start(); break;
+      case 'start': actions.start(); focusGame(); break;
       case 'choose': actions.selectCar(selectedId); changeGarageTab('garage'); break;
       case 'cycle': { const index = Math.max(0, CARS.findIndex(car => car.id === selectedId)); selectedId = CARS[(index + Number(target.dataset.step) + CARS.length) % CARS.length].id; actions.selectCar(selectedId); break; }
       case 'select': actions.selectCar(target.dataset.id!); break;
-      case 'buy': actions.buyCar(selectedId); break;
+      case 'buy': if (!CHALLENGES.some(challenge => challenge.carId === selectedId)) actions.buyCar(selectedId); break;
+      case 'buyTurret': actions.buyTurret(); break;
+      case 'toggleTurret': actions.toggleTurret(); break;
+      case 'upgradeTurret': actions.upgradeTurret(); break;
+      case 'sandbox': actions.toggleSandbox(); break;
+      case 'settingmodal': toggleGarageSettings(); break;
       case 'paint': actions.paint(target.dataset.color!); break;
       case 'upgrade': actions.upgrade(target.dataset.key as UpgradeKey); break;
       case 'repair': actions.repair(); break;
-      case 'resume': actions.resume(); break;
+      case 'resume': actions.resume(); focusGame(); break;
       case 'garage': actions.garage(); break;
-      case 'restart': actions.restart(); break;
+      case 'restart': actions.restart(); focusGame(); break;
       case 'music': actions.toggleMusic(); break;
       case 'map': actions.openMap(); break;
       case 'pursuit': actions.togglePursuit(); break;
-      case 'weapon': actions.selectWeapon(target.dataset.weapon as WeaponKind); break;
+      case 'weapon': actions.selectWeapon(target.dataset.weapon as WeaponKind); if (!target.closest('[role="dialog"]')) focusGame(); break;
       case 'testpanel':
         els.drivingPanel.hidden = !els.drivingPanel.hidden;
         els.testToggle.setAttribute('aria-expanded', String(!els.drivingPanel.hidden));
+        if (els.drivingPanel.hidden) focusGame();
+        else els.drivingPanel.querySelector<HTMLSelectElement>('select')?.focus();
         break;
       case 'tab': changeGarageTab(target.dataset.tab as GarageTab); break;
     }
@@ -151,11 +194,29 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
   root.addEventListener('click', click);
   const change = (event: Event) => {
     const select = event.target;
+    if (select instanceof HTMLSelectElement && select.dataset.setting === 'assist') actions.setAimAssist(select.dataset.weapon as WeaponKind, select.value as AimAssist);
+    if (select instanceof HTMLSelectElement && select.dataset.setting === 'wanted') actions.setWanted(Number(select.value));
+    if (select instanceof HTMLInputElement && select.dataset.setting === 'cheat') actions.setCheat(select.dataset.cheat as CheatKey, select.checked);
+    if (select instanceof HTMLInputElement && select.dataset.setting === 'volume') actions.setVolume(select.dataset.channel as AudioChannel, Number(select.value) / 100);
     if (select instanceof HTMLSelectElement && select.dataset.setting === 'handling') { actions.setHandling(select.value as HandlingProfileId); select.blur(); }
     if (select instanceof HTMLSelectElement && select.dataset.setting === 'traffic') { actions.setTrafficSide(select.value as 'right' | 'left'); select.blur(); }
   };
-  const selectKey = (event: KeyboardEvent) => { if (event.target instanceof HTMLSelectElement) event.stopPropagation(); if (event.target instanceof HTMLButtonElement && event.target.dataset.action === 'map' && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); event.stopPropagation(); actions.openMap(); } };
+  const volumeInput = (event: Event) => {
+    const input = event.target;
+    if (input instanceof HTMLInputElement && input.dataset.setting === 'volume') actions.setVolume(input.dataset.channel as AudioChannel, Number(input.value) / 100);
+  };
+  const selectKey = (event: KeyboardEvent) => {
+    if (!els.garageSettings.hidden && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); toggleGarageSettings(); return; }
+    if (!els.drivingPanel.hidden && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); els.drivingPanel.hidden = true; els.testToggle.setAttribute('aria-expanded', 'false'); focusGame(); return; }
+    if (!els.garageSettings.hidden && event.key === 'Tab') {
+      const focusable = Array.from(els.garageSettings.querySelectorAll<HTMLElement>('button:not(:disabled),select:not(:disabled),input:not(:disabled),summary')).filter(el => el.offsetParent !== null);
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      event.stopPropagation();
+    } if ((event.target instanceof HTMLSelectElement || event.target instanceof HTMLInputElement)) event.stopPropagation(); if (event.target instanceof HTMLButtonElement && event.target.dataset.action === 'map' && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); event.stopPropagation(); actions.openMap(); } };
   root.addEventListener('change', change);
+  root.addEventListener('input', volumeInput);
   root.addEventListener('keydown', selectKey);
   const reticle = els.reticle;
   reticle.style.transform = `translate3d(${window.innerWidth / 2 - 9}px,${window.innerHeight / 2 - 9}px,0)`;
@@ -173,6 +234,24 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
     if (disposed) return;
     selectedId = save.selected;
     root.dataset.weapon = state.weapon || 'turret';
+    root.dataset.sandbox = String(state.sandbox);
+    text('compactCredits', money(save.credits));
+    for (const select of assistSelects) select.value = select.dataset.weapon === 'turret' ? state.turretAssist : state.rocketAssist;
+    for (const select of wantedSelects) select.value = String(state.wantedOverride);
+    for (const input of cheatInputs) input.checked = state.cheats[input.dataset.cheat as CheatKey];
+    for (const options of sandboxOptions) options.disabled = !state.sandbox;
+    for (const toggle of sandboxToggles) { toggle.textContent = state.sandbox ? 'ПЕСОЧНИЦА ВКЛЮЧЕНА' : 'ВКЛЮЧИТЬ ПЕСОЧНИЦУ'; toggle.setAttribute('aria-pressed', String(state.sandbox)); }
+    for (const input of volumeInputs) if (document.activeElement !== input) input.value = String(Math.round(save.volumes[input.dataset.channel as AudioChannel] * 100));
+    for (const output of volumeOutputs) output.value = `${Math.round(save.volumes[output.dataset.volumeLabel as AudioChannel] * 100)}%`;
+    for (const card of challengeEls) {
+      const challenge = CHALLENGES.find(item => item.id === card.dataset.challenge)!;
+      const complete = save.completedChallenges.includes(challenge.id) || save.owned.includes(challenge.carId);
+      const value = Math.min(challenge.target, challengeProgress(save, challenge.id));
+      const progress = card.querySelector<HTMLProgressElement>('progress')!;
+      progress.value = complete ? challenge.target : value;
+      card.classList.toggle('is-complete', complete);
+      card.querySelector<HTMLElement>('[data-challenge-progress]')!.textContent = complete ? 'ВЫПОЛНЕНО · МАШИНА В ГАРАЖЕ' : `${Math.floor(value).toLocaleString('ru-RU')} / ${challenge.target.toLocaleString('ru-RU')}`;
+    }
     for (const select of handlingSelects) if (select.value !== state.handlingProfile) select.value = state.handlingProfile || 'arcade';
     for (const select of trafficSelects) if (select.value !== state.trafficSide) select.value = state.trafficSide || 'right';
     const handlingDescription = handlingDescriptions[state.handlingProfile || 'arcade'];
@@ -182,13 +261,15 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
       if (button.textContent !== label) button.textContent = label;
       button.classList.toggle('is-off', !state.pursuitEnabled); button.setAttribute('aria-pressed', String(state.pursuitEnabled));
     }
-    for (const button of weaponButtons) { const selected = button.dataset.weapon === state.weapon; button.classList.toggle('is-active', selected); button.setAttribute('aria-pressed', String(selected)); }
-    for (const count of rocketCounts) if (count.textContent !== String(state.rockets ?? 0)) count.textContent = String(state.rockets ?? 0);
+    for (const button of weaponButtons) { button.disabled = button.dataset.weapon === 'turret' && !(state.mode === 'garage' ? turretAvailable(save) : state.turretEquipped); button.title = button.dataset.weapon === 'turret' && button.disabled ? 'Купи и установи турель в гараже → Тюнинг' : button.dataset.weapon === 'turret' ? 'Турель — 1' : 'Ракеты — 2'; const selected = button.dataset.weapon === state.weapon; button.classList.toggle('is-active', selected); button.setAttribute('aria-pressed', String(selected)); }
+    const rocketCount = state.sandbox && state.cheats.unlimitedAmmo ? '∞' : String(state.rockets ?? 0);
+    for (const count of rocketCounts) if (count.textContent !== rocketCount) count.textContent = rocketCount;
     text('targetName', state.targetName || '');
     els.targetName.parentElement!.hidden = !state.targetName;
     els.rocketStatus.hidden = state.weapon !== 'rocket';
-    text('rocketStatus', state.rockets <= 0 ? 'НЕТ РАКЕТ' : !state.targetName ? 'НЕТ ЦЕЛИ' : state.rocketReady ? 'РАКЕТА ГОТОВА' : 'ПЕРЕЗАРЯДКА…');
-    els.rocketStatus.classList.toggle('is-ready', state.rocketReady && state.rockets > 0);
+    const hasRockets = state.rockets > 0 || state.sandbox && state.cheats.unlimitedAmmo;
+    text('rocketStatus', !hasRockets ? 'НЕТ РАКЕТ' : !state.targetName ? 'НЕТ ЦЕЛИ' : state.rocketReady ? 'РАКЕТА ГОТОВА' : 'ПОДГОТОВКА…');
+    els.rocketStatus.classList.toggle('is-ready', state.rocketReady && hasRockets);
     els.pickupNotice.hidden = !(state.mode === 'playing' && (state.pickupNoticeTime || 0) > 0 && state.pickupNotice);
     if (!els.pickupNotice.hidden) text('pickupNotice', state.pickupNotice!);
     const engineBurning = state.mode === 'playing' && (state.burnSeconds || 0) > 0;
@@ -202,9 +283,10 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
       els.pause.hidden = state.mode !== 'paused';
       els.gameover.hidden = state.mode !== 'gameover';
       reticle.hidden = state.mode !== 'playing';
+      if (state.mode !== 'garage') els.garageSettings.hidden = true;
       lastMode = state.mode;
     }
-    text('musicLabel', save.music ? 'ЗВУК ВКЛ' : 'ЗВУК ВЫКЛ');
+    text('musicLabel', save.music ? 'МУЗЫКА ВКЛ' : 'МУЗЫКА ВЫКЛ');
     for (const toggle of musicToggles) { const label = save.music ? 'МУЗЫКА ВКЛЮЧЕНА' : 'МУЗЫКА ВЫКЛЮЧЕНА'; if (toggle.textContent !== label) toggle.textContent = label; toggle.setAttribute('aria-pressed', String(save.music)); }
     sound.dataset.on = String(save.music);
     sound.setAttribute('aria-label', save.music ? 'Выключить музыку' : 'Включить музыку');
@@ -224,26 +306,27 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
         const levels = carUpgrades(save, spec.id);
         const color = save.colors[spec.id] || spec.color;
         text('carIndex', `0${index + 1}`);
-        text('carClass', ['ГОРОД / КЛАСС 01', 'ВНЕДОРОЖНИК / КЛАСС 02', 'ТЯЖЁЛЫЙ / КЛАСС 03'][index]);
-        text('ownedLabel', owned ? 'В ТВОЁМ ГАРАЖЕ' : 'ДОСТУПЕН ДЛЯ ПОКУПКИ');
+        text('carClass', ({ comet: 'ГОРОД / ЛЁГКИЙ', rally: 'РАЛЛИ / СРЕДНИЙ', brute: 'ПИКАП / ТЯЖЁЛЫЙ', kestrel: 'СПОРТ / ЛЁГКИЙ', sandfox: 'БАГГИ / БЕЗДОРОЖЬЕ', cobra: 'СУПЕРКАР / СКОРОСТЬ', bastion: 'БРОНЕВИК / ТЯЖЁЛЫЙ' } as Record<string, string>)[spec.id] || 'ОСОБАЯ МАШИНА');
+        const challenge = CHALLENGES.find(item => item.carId === spec.id);
+        text('ownedLabel', owned ? 'В ТВОЁМ ГАРАЖЕ' : challenge ? `НАГРАДА · ${challenge.difficulty}` : 'ДОСТУПЕН ДЛЯ ПОКУПКИ');
         text('carName', spec.name);
         text('menuCarName', spec.name);
         text('carSubtitle', spec.subtitle);
         const upgradedSpeed = Math.round(spec.speed * (1 + levels.engine * 0.085) * 3.6);
-        const upgradedHandling = Math.round(spec.handling * (1 + levels.tires * 0.1) * 80);
+        const upgradedHandling = Math.round((1 + levels.handling * .1) * 100);
         const upgradedArmor = spec.armor + levels.armor * 30;
         text('speedStat', `${upgradedSpeed} КМ/Ч`);
-        text('handlingStat', upgradedHandling);
+        text('handlingStat', `${upgradedHandling}% ОТКЛИК`);
         text('armorStat', upgradedArmor);
         bar('speedBar', upgradedSpeed / 170 * 100);
         bar('handlingBar', upgradedHandling / 130 * 100);
         bar('armorBar', upgradedArmor / 290 * 100);
         text('credits', money(save.credits));
         text('garageBest', clock(save.best));
-        text('launchLabel', owned ? root.dataset.garageTab === 'cars' ? 'ВЫБРАТЬ' : 'ПОЛНЫЙ ГАЗ!' : `КУПИТЬ / ${money(spec.price)} $`);
+        text('launchLabel', owned ? root.dataset.garageTab === 'cars' ? 'ВЫБРАТЬ' : 'ПОЛНЫЙ ГАЗ!' : challenge ? 'ВЫПОЛНИ ЗАДАНИЕ' : `КУПИТЬ / ${money(spec.price)} $`);
         els.launch.dataset.action = owned ? root.dataset.garageTab === 'cars' ? 'choose' : 'start' : 'buy';
-        (els.launch as HTMLButtonElement).disabled = !owned && save.credits < spec.price;
-        text('launchNote', owned ? 'Погоня начинается с первого поворота.' : save.credits < spec.price ? `Ещё ${money(spec.price - save.credits)} $ — и она твоя.` : 'Твой следующий способ исчезнуть.');
+        (els.launch as HTMLButtonElement).disabled = !owned && (!!challenge || save.credits < spec.price);
+        text('launchNote', owned ? 'Погоня начинается с первого поворота.' : challenge ? `${challenge.description} · Награда бесплатно.` : save.credits < spec.price ? `Ещё ${money(spec.price - save.credits)} $ — и она твоя.` : 'Твой следующий способ исчезнуть.');
         for (const tab of carTabs) {
           const active = tab.dataset.id === spec.id;
           tab.classList.toggle('is-active', active);
@@ -257,18 +340,30 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
           swatch.setAttribute('aria-pressed', String(active));
           swatch.disabled = !owned;
         }
-        text('paintLabel', ['ЛАЙМ', 'ТЕРРАКОТА', 'ЛЁД', 'АЙВОРИ', 'ЛАВАНДА', 'ГРАФИТ'][Math.max(0, PAINTS.indexOf(color))]);
+        text('paintLabel', (paintNames[color] || 'СВОЙ ЦВЕТ').toUpperCase());
         for (const button of upgrades) {
           const key = button.dataset.key as UpgradeKey;
           const level = levels[key];
-          const cost = upgradeCost(level);
+          const cost = upgradeCost(level, key);
           button.disabled = !owned || level >= 3 || save.credits < cost;
-          button.setAttribute('aria-label', `${UPGRADE_NAMES[key]}, уровень ${level} из 3${level < 3 ? `, улучшить за ${cost} кредитов` : ', максимум'}`);
+          button.setAttribute('aria-label', `${UPGRADE_NAMES[key]}, уровень ${level} из 3. ${upgradeEffect(spec, key, level)}${level < 3 ? ` Улучшить за ${cost} кредитов.` : ' Максимум.'}`);
           button.querySelector<HTMLElement>('[data-price]')!.textContent = level >= 3 ? 'МАКС.' : `${money(cost)} $`;
           button.querySelector<HTMLElement>('[data-level-label]')!.textContent = `УРОВЕНЬ ${level} / 3`;
           button.querySelectorAll('[data-level] i').forEach((pip, i) => pip.classList.toggle('is-filled', i < level));
+          button.querySelector<HTMLElement>('[data-upgrade-effect]')!.textContent = upgradeEffect(spec, key, level);
           button.querySelector<HTMLElement>('.dl-upgrade-add')!.textContent = level >= 3 ? '✓' : '+';
         }
+        const installed = turretAvailable(save, spec.id), cooling = save.turretCooling;
+        text('turretOwnership', save.turretOwned ? 'Турель куплена · доступна для всех машин' : 'Турель не куплена · начни заезд без неё');
+        els.turretBuy.hidden = save.turretOwned;
+        (els.turretBuy as HTMLButtonElement).disabled = save.credits < TURRET_PRICE;
+        els.turretInstall.hidden = !save.turretOwned;
+        (els.turretInstall as HTMLButtonElement).disabled = !owned;
+        els.turretInstall.setAttribute('aria-pressed', String(installed));
+        text('turretInstall', !owned ? 'СНАЧАЛА ОТКРОЙ МАШИНУ' : installed ? 'СНЯТЬ С ЭТОЙ МАШИНЫ' : 'УСТАНОВИТЬ НА ЭТУ МАШИНУ');
+        (els.turretUpgrade as HTMLButtonElement).disabled = !save.turretOwned || cooling >= 3 || save.credits < turretCoolingCost(cooling);
+        text('turretUpgradePrice', cooling >= 3 ? 'МАКС.' : `${money(turretCoolingCost(cooling))} $`);
+        text('turretUpgradeEffect', `УРОВЕНЬ ${cooling} / 3 · скорость охлаждения +${cooling * 15}%${cooling < 3 ? ` → +${(cooling + 1) * 15}%` : ''}`);
         const needsRepair = owned && (hull < 99.5 || state.engine < 99.5 || state.tires < 99.5);
         const condition = Math.round(Math.min(hull, state.engine, state.tires));
         text('condition', `${condition}%`);
@@ -298,7 +393,7 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
     for (let i = 0; i < stars.length; i++) stars[i].classList.toggle('is-active', i < wanted);
     els.stars.parentElement!.classList.toggle('is-hunted', wanted > 0);
     els.stars.setAttribute('aria-label', `Розыск: ${wanted} из 5`);
-    text('pursuitLabel', !state.pursuitEnabled ? 'СВОБОДНЫЙ ЗАЕЗД · БЕЗ ПОЛИЦИИ' : wanted === 0 ? 'СВОБОДНАЯ ДОРОГА' : state.escape > 0 ? 'ТЕРЯЕМ ХВОСТ' : `ПРЕСЛЕДОВАНИЕ / ${wanted}`);
+    text('pursuitLabel', state.sandbox ? `ПЕСОЧНИЦА · ${wanted} ★` : !state.pursuitEnabled ? 'СВОБОДНЫЙ ЗАЕЗД · БЕЗ ПОЛИЦИИ' : wanted === 0 ? 'СВОБОДНАЯ ДОРОГА' : state.escape > 0 ? 'ТЕРЯЕМ ХВОСТ' : `ПРЕСЛЕДОВАНИЕ / ${wanted}`);
     els.escapeTrack.style.opacity = wanted > 0 && state.escape > 0 ? '1' : '0';
     bar('escapeFill', state.escape);
     for (const [prefix, value] of [['nitro', state.nitro], ['hull', hull], ['engine', state.engine], ['tires', state.tires], ['heat', state.heat]] as const) {
@@ -306,8 +401,8 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
       text(`${prefix}Value`, `${Math.round(percent(value))}%`);
     }
     els.heatFill.classList.toggle('is-hot', state.heat > 80);
-    text('heatLabel', state.heat >= 98 ? 'ПЕРЕГРЕВ' : 'НАГРЕВ');
-    text('ammo', Math.max(0, state.ammo));
+    text('heatLabel', !state.turretEquipped ? 'ТУРЕЛЬ НЕ УСТАНОВЛЕНА' : state.sandbox && state.cheats.noOverheat ? 'БЕЗ ПЕРЕГРЕВА' : state.heat >= 98 ? 'ПЕРЕГРЕВ' : 'НАГРЕВ');
+    text('ammo', state.sandbox && state.cheats.unlimitedAmmo ? '∞' : Math.max(0, state.ammo));
     text('nearGarage', state.wanted > 0 ? 'СНАЧАЛА СБРОСЬ ХВОСТ' : `ГАРАЖ / ${Math.round(state.garageDistance)} М`);
     els.enterGarage.hidden = !(state.canGarage && state.garageDistance < 13 && state.mode === 'playing');
     const canEnterGarage = state.canGarage && state.garageDistance < 13;
@@ -393,5 +488,5 @@ export function createUI(container: HTMLElement, actions: UIActions): GameUI {
     ctx.beginPath(); ctx.moveTo(0, -8); ctx.lineTo(5, 6); ctx.lineTo(0, 3); ctx.lineTo(-5, 6); ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
   }
 
-  return { render, drawMinimap, dispose() { disposed = true; root.removeEventListener('click', click); root.removeEventListener('change', change); root.removeEventListener('keydown', selectKey); window.removeEventListener('pointermove', pointerMove); root.remove(); } };
+  return { render, drawMinimap, dispose() { disposed = true; root.removeEventListener('click', click); root.removeEventListener('change', change); root.removeEventListener('input', volumeInput); root.removeEventListener('keydown', selectKey); window.removeEventListener('pointermove', pointerMove); root.remove(); } };
 }

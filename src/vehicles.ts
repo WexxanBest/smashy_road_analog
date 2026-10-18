@@ -1,6 +1,7 @@
 import { Color3, Matrix, Mesh, MeshBuilder, Quaternion, Scene, StandardMaterial, TransformNode, Vector3, VertexData } from '@babylonjs/core';
 import type { ShadowGenerator } from '@babylonjs/core';
 import type { CarSpec, VehicleVisual } from './types';
+import { conceptArch, conceptBox, conceptWheelRing } from './vehicle-concepts';
 
 type Point = [number, number, number];
 type Panel = { mesh: Mesh; position: Vector3; rotation: Vector3; scaling: Vector3 };
@@ -16,7 +17,7 @@ function compactMaterial(scene: Scene): StandardMaterial {
 }
 
 /** Static trim is batched; removable panels retain independent geometry and pivots. */
-export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 'player' | 'police' | 'traffic' = 'player'): VehicleVisual {
+export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 'player' | 'police' | 'traffic' = 'player'): VehicleVisual & { setTurretEnabled(enabled: boolean): void } {
   const root = new TransformNode(`vehicle-${kind}-${spec.id}`, scene);
   const chassis = new TransformNode('chassis', scene);
   chassis.parent = root;
@@ -32,13 +33,23 @@ export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 
   let debrisQueue: Mesh[] = [];
   const emptyDebris: Mesh[] = [];
   const w = spec.width, l = spec.length;
-  const pickup = spec.id === 'brute', rally = spec.id === 'rally';
-  const chassisY = rally || pickup ? 0.82 : 0.72;
-  const roofY = pickup ? 1.72 : rally ? 1.66 : 1.48;
+  const conceptSpec = spec as CarSpec & { bodyStyle?: 'hatch'|'suv'|'pickup'|'coupe'|'buggy'|'muscle'|'van'; policeRole?: 'patrol'|'interceptor'|'suv'|'swat' };
+  const role = kind === 'police' ? conceptSpec.policeRole ?? 'patrol' : undefined;
+  const defaultStyles: Record<string, NonNullable<typeof conceptSpec.bodyStyle>> = {rally:'suv',brute:'pickup',kestrel:'coupe',sandfox:'buggy',cobra:'muscle',bastion:'van'};
+  const style = role==='swat'?'van':role==='suv'?'suv':role==='interceptor'?'coupe':conceptSpec.bodyStyle??defaultStyles[spec.id]??'hatch';
+  const pickup = style === 'pickup', rally = style === 'suv', buggy = style === 'buggy', coupe = style === 'coupe', muscle = style === 'muscle', van = style === 'van';
+  const sedan = kind === 'police' && !rally && !van;
+  const chassisY = van ? .87 : pickup ? .85 : rally ? .88 : buggy ? .61 : coupe ? .67 : .73;
+  const roofY = van ? 2.32 : rally ? 2.00 : pickup ? 1.91 : buggy ? 1.69 : coupe ? 1.47 : muscle ? 1.51 : 1.66;
+  const bodyWidth = w * (buggy ? .72 : .83), bodyHalf = bodyWidth / 2;
+  const wheelRadius = van ? .47 : pickup ? .48 : rally ? .46 : buggy ? .45 : .39;
+  const wheelWidth = pickup || rally || buggy || van ? .31 : .25;
+  const axle = l * (pickup ? .33 : van ? .32 : .305), wheelX = w * .455;
   let stage = 0, disposed = false;
   let health = 1, tires = 1, compactRequested = false, compactShown = false;
   let compactMesh: Mesh | undefined;
-  let baseColor = Color3.FromHexString(kind === 'police' ? '#e7e9e2' : color);
+  let turretEnabled = false;
+  let baseColor = Color3.FromHexString(kind === 'police' ? role === 'swat' ? '#364442' : '#e7e9e2' : color);
   const charredColor = Color3.FromHexString('#343834');
 
   function material(name: string, hex: string, glow = 0): StandardMaterial {
@@ -46,17 +57,20 @@ export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 
     mat.diffuseColor = Color3.FromHexString(hex);
     mat.specularColor = new Color3(0.08, 0.09, 0.1);
     mat.specularPower = 24;
+    // Procedural gallery faces use outward CCW normals; retain two-sided glass
+    // and panel backs so detached doors remain visible from either direction.
+    mat.backFaceCulling = false;
     if (glow) mat.emissiveColor = mat.diffuseColor.scale(glow);
     materials.push(mat);
     return mat;
   }
-  const paint = material('body-paint', kind === 'police' ? '#e7e9e2' : color);
+  const paint = material('body-paint', kind === 'police' ? role === 'swat' ? '#364442' : '#e7e9e2' : color);
   paint.specularColor = new Color3(0.24, 0.24, 0.2);
-  const dark = material('rubber-trim', '#222b2f');
-  const metal = material('wheel-metal', '#a4b5b9');
+  const dark = material('rubber-trim', '#222925');
+  const metal = material('wheel-metal', '#a7afa1');
   const black = material('police-panels', '#25323a');
-  const glass = material('opaque-blue-glass', '#345968');
-  glass.specularColor = new Color3(0.3, 0.4, 0.42);
+  const glass = material('opaque-blue-glass', '#172d30');
+  glass.specularColor = new Color3(0.22, 0.3, 0.29);
   const lights = material('warm-headlights', '#fff1bf', 0.5);
   const tail = material('tail-lights', '#d95247', 0.35);
   const exposed = material('exposed-damaged-metal', '#c2c2aa');
@@ -71,7 +85,7 @@ export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 
     return mesh;
   }
   function box(name: string, width: number, height: number, depth: number, x: number, y: number, z: number, mat: StandardMaterial, parent: TransformNode = chassis, batch = parent === chassis): Mesh {
-    const mesh = MeshBuilder.CreateBox(name, { width, height, depth }, scene);
+    const mesh = conceptBox(scene, name, width, height, depth, Math.min(.045, height*.22));
     mesh.position.set(x, y, z);
     return register(mesh, mat, parent, batch);
   }
@@ -82,7 +96,9 @@ export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 
       for (const p of face) positions.push(...p);
       for (let i = 1; i < face.length - 1; i++) indices.push(offset, offset + i, offset + i + 1);
     }
-    VertexData.ComputeNormals(positions, indices, normals);
+    // Gallery geometry is outward CCW; normals must follow that winding even
+    // when the game scene itself uses Babylon's left-handed camera convention.
+    VertexData.ComputeNormals(positions,indices,normals,{useRightHandedSystem:true});
     const data = new VertexData();
     data.positions = positions; data.indices = indices; data.normals = normals;
     data.uvs = new Array((positions.length / 3) * 2).fill(0);
@@ -107,33 +123,35 @@ export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 
   }
 
   // A low sill, separate fenders and a dark floor create real openings after panel loss.
-  const halfW = w * 0.47, halfL = l * 0.48, corner = 0.2;
+  const halfW = bodyHalf, halfL = l * .47, corner = buggy ? .30 : .14;
   const outline = [[-halfW + corner, halfL], [halfW - corner, halfL], [halfW, halfL - corner], [halfW, -halfL + corner], [halfW - corner, -halfL], [-halfW + corner, -halfL], [-halfW, -halfL + corner], [-halfW, halfL - corner]];
   const lower: Point[] = outline.map(([x, z]) => [x * 0.95, chassisY - 0.25, z]);
   const upper: Point[] = outline.map(([x, z]) => [x, chassisY - 0.015, z * 0.98]);
   const bodyFaces: Point[][] = [lower.slice().reverse(), upper];
   for (let i = 0; i < outline.length; i++) { const j = (i + 1) % outline.length; bodyFaces.push([lower[i], lower[j], upper[j], upper[i]]); }
   poly('chamfered-sill-body', bodyFaces, paint, chassis, true);
-  box('underbody', w * 0.78, 0.15, l * 0.87, 0, chassisY - 0.27, 0, dark);
-  box('interior-floor', w * 0.77, 0.055, l * 0.88, 0, chassisY + 0.025, 0, dark);
-  const cabinCenter = pickup ? 0.18 : -0.19;
-  const frontBottom = cabinCenter + (pickup ? 0.75 : 0.84), rearBottom = cabinCenter - (pickup ? 0.67 : 0.86);
-  const frontTop = cabinCenter + 0.43, rearTop = cabinCenter - 0.57;
-  const cabinBottom = chassisY + 0.2, baseW = w * 0.43, topW = w * 0.355;
+  box('underbody', w * .69, .15, l * .86, 0, chassisY-.27, 0, dark);
+  box('interior-floor', bodyWidth*.92, .055, l*.87, 0, chassisY+.025, 0, dark);
+  const frontBottom = van ? l*.40 : pickup ? l*.18 : rally ? l*.16 : buggy ? l*.14 : coupe ? l*.13 : muscle ? l*.10 : l*.18;
+  const rearBottom = van ? -l*.43 : pickup ? -l*.165 : rally ? -l*.395 : buggy ? -l*.17 : coupe ? -l*.29 : muscle ? -l*.28 : sedan ? -l*.32 : -l*.36;
+  const frontTop = van ? l*.36 : pickup ? l*.07 : rally ? l*.068 : buggy ? l*.085 : coupe ? l*.015 : muscle ? -l*.01 : l*.042;
+  const rearTop = van ? -l*.40 : pickup ? -l*.132 : rally ? -l*.34 : buggy ? -l*.135 : coupe ? -l*.18 : muscle ? -l*.19 : sedan ? -l*.20 : -l*.278;
+  const cabinCenter = (frontBottom+rearBottom)/2;
+  const cabinBottom = chassisY+.20, baseW = bodyHalf*.97, topW = bodyHalf*(van?.91:rally?.88:coupe?.77:.82);
   const hoodDepth = l * 0.47 - frontBottom, hoodCenter = frontBottom + hoodDepth * 0.5;
-  const hood = panel(box('detachable-hood', w * 0.76, 0.1, hoodDepth, 0, chassisY + 0.24, hoodCenter, paint, chassis, false));
+  const hood = panel(box('detachable-hood', bodyWidth*(buggy?.72:.95), .105, hoodDepth, 0, chassisY+.24, hoodCenter, kind==='police'&&!van?black:paint, chassis, false));
   const trunkDepth = Math.max(0.45, rearBottom + l * 0.47), trunkCenter = rearBottom - trunkDepth * 0.5;
-  const trunk = panel(box(pickup ? 'detachable-pickup-tailgate' : 'detachable-trunk', w * 0.78, pickup ? 0.2 : 0.11, pickup ? 0.15 : trunkDepth, 0, chassisY + (pickup ? 0.3 : 0.23), pickup ? -l * 0.45 : trunkCenter, paint, chassis, false));
-  const frontBumper = panel(box('detachable-front-bumper', w * 0.94, pickup ? 0.23 : 0.18, 0.2, 0, chassisY - 0.08, l * 0.49, dark, chassis, false));
-  const rearBumper = panel(box('detachable-rear-bumper', w * 0.89, 0.16, 0.17, 0, chassisY - 0.1, -l * 0.49, dark, chassis, false));
-  box('front-grille', w * 0.36, 0.17, 0.035, 0, chassisY + 0.06, l * 0.482, dark);
-  box('grille-bar', w * 0.31, 0.026, 0.045, 0, chassisY + 0.06, l * 0.489, metal);
+  const trunk = panel(box(pickup ? 'detachable-pickup-tailgate' : 'detachable-trunk', bodyWidth*.94, pickup||van ? .30 : .11, pickup||van ? .15 : trunkDepth, 0, chassisY+(pickup||van?.30:.23), pickup||van ? -l*.455 : trunkCenter, paint, chassis, false));
+  const frontBumper = panel(box('detachable-front-bumper', w*.91, pickup||van||rally?.26:.21, .22, 0, chassisY-.18, l*.49, dark, chassis, false));
+  const rearBumper = panel(box('detachable-rear-bumper', w*.9, .20, .19, 0, chassisY-.18, -l*.49, dark, chassis, false));
+  box('front-grille', bodyWidth*(pickup?.65:.56), pickup||van?.28:.17, .035, 0, chassisY+.06, l*.477, dark);
+  for(const row of pickup||muscle ? [-1,0,1]:[0]) box('grille-bar', bodyWidth*.53, .023, .025, 0, chassisY+.06+row*.075, l*.486, metal);
   for (const side of [-1, 1]) {
-    box('front-fender', w * 0.115, 0.41, hoodDepth + 0.1, side * w * 0.415, chassisY + 0.025, hoodCenter, paint);
-    box('rear-fender', w * 0.115, 0.41, trunkDepth + 0.13, side * w * 0.415, chassisY + 0.025, trunkCenter, paint);
-    box('headlight', w * 0.18, 0.14, 0.045, side * w * 0.33, chassisY + 0.1, l * 0.482, lights);
-    box('tail-light', w * 0.12, 0.13, 0.04, side * w * 0.35, chassisY + 0.08, -l * 0.483, tail);
-    box('side-sill', 0.09, 0.09, l * 0.48, side * w * 0.46, chassisY - 0.23, 0, dark);
+    box('front-fender', bodyWidth*.105, buggy?.25:.41, hoodDepth+.1, side*bodyHalf*.895, chassisY+.025, hoodCenter, paint);
+    box('rear-fender', bodyWidth*.105, buggy?.25:.41, trunkDepth+.13, side*bodyHalf*.895, chassisY+.025, trunkCenter, paint);
+    box('headlight', bodyWidth*.18, rally||van||pickup?.22:.16, .045, side*bodyWidth*.38, chassisY+.10, l*.477, lights);
+    box('tail-light', bodyWidth*.14, .19, .04, side*bodyWidth*.38, chassisY+.08, -l*.478, tail);
+    box('side-sill', .10, .11, l*.48, side*bodyHalf, chassisY-.23, 0, dark);
     box('bucket-seat', 0.42, 0.17, 0.52, side * w * 0.19, chassisY + 0.14, cabinCenter - 0.13, seats);
     box('seat-back', 0.43, 0.39, 0.13, side * w * 0.19, chassisY + 0.3, cabinCenter - 0.4, seats);
   }
@@ -142,13 +160,13 @@ export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 
     box('engine-cylinder-bank', 0.12, 0.08, hoodDepth * 0.62, side * w * 0.14, chassisY + 0.19, hoodCenter, dark);
     box('engine-red-cable', 0.04, 0.025, hoodDepth * 0.6, side * w * 0.09, chassisY + 0.22, hoodCenter, tail);
   }
-  box('cabin-roof', topW * 2 + 0.08, 0.095, frontTop - rearTop + 0.08, 0, roofY, (frontTop + rearTop) * 0.5, paint);
+  box('cabin-roof', topW*2+.055, buggy?.045:.095, frontTop-rearTop+.07, 0, roofY, (frontTop+rearTop)*.5, buggy?dark:paint);
   for (const side of [-1, 1]) {
     segment('front-cabin-pillar', [side * baseW, cabinBottom, frontBottom], [side * topW, roofY, frontTop], 0.085, paint, chassis, true);
     segment('rear-cabin-pillar', [side * baseW, cabinBottom, rearBottom], [side * topW, roofY, rearTop], 0.085, paint, chassis, true);
     segment('center-cabin-pillar', [side * baseW, cabinBottom, cabinCenter - 0.08], [side * topW, roofY, cabinCenter - 0.08], 0.065, paint, chassis, true);
   }
-  const lowY = cabinBottom + 0.08, highY = roofY - 0.075;
+  const lowY = van ? roofY-.65 : cabinBottom+.08, highY = roofY-(buggy?.17:.075);
   const lo = (lowY - cabinBottom) / (roofY - cabinBottom), hi = (highY - cabinBottom) / (roofY - cabinBottom);
   const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
   const lowW = lerp(baseW, topW, lo), highW = lerp(baseW, topW, hi);
@@ -157,6 +175,12 @@ export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 
   const frontPoints: Point[] = [[-lowW + 0.06, lowY, lowFront + 0.012], [lowW - 0.06, lowY, lowFront + 0.012], [highW - 0.05, highY, highFront + 0.012], [-highW + 0.05, highY, highFront + 0.012]];
   const windshield = panel(poly('windscreen', [frontPoints], glass));
   const rearWindow = panel(poly('rear-window', [[[-lowW + 0.08, lowY, lowRear - 0.012], [-highW + 0.06, highY, highRear - 0.012], [highW - 0.06, highY, highRear - 0.012], [lowW - 0.08, lowY, lowRear - 0.012]]], glass));
+  if(buggy) rearWindow.setEnabled(false);
+  if(van) {
+    box('armored-windscreen-bulkhead',bodyWidth*.94,.57,.14,0,1.36,frontBottom-.055,paint);
+    box('van-rear-bulkhead',bodyWidth*.94,.61,.13,0,1.36,rearBottom+.035,paint);
+    box('armored-roof-rib',topW*1.96,.09,.13,0,roofY+.07,cabinCenter-.25,dark);
+  }
   const center: Point = [0.12, lerp(lowY, highY, 0.52), lerp(lowFront, highFront, 0.52) + 0.025];
   for (const end of frontPoints) {
     const crack = segment('windscreen-crack', center, [lerp(center[0], end[0], 0.86), lerp(center[1], end[1], 0.86), lerp(center[2], end[2], 0.86) + 0.02], 0.018, crackMat, windshield);
@@ -167,24 +191,30 @@ export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 
 
   const doors: Mesh[] = [];
   for (const side of [-1, 1]) {
-    const door = panel(box(side < 0 ? 'detachable-left-door' : 'detachable-right-door', 0.095, 0.43, frontBottom - rearBottom - 0.08, side * w * 0.451, chassisY + 0.01, cabinCenter, paint, chassis, false));
+    const door = panel(box(side < 0 ? 'detachable-left-door' : 'detachable-right-door', .095, buggy?.10:van?1.0:.43, frontBottom-rearBottom-.08, side*bodyHalf*.99, chassisY+(van?.30:.01), cabinCenter, buggy?dark:paint, chassis, false));
     doors.push(door);
     const split = cabinCenter - 0.08;
-    const glassFaces: Point[][] = [
+    const twoWindows=split-.065>Math.max(lowRear+.07,highRear+.06);
+    const glassFaces: Point[][] = twoWindows ? [
       [[side * (lowW + 0.014), lowY, lowFront - 0.07], [side * (lowW + 0.014), lowY, split + 0.045], [side * (highW + 0.014), highY, split + 0.045], [side * (highW + 0.014), highY, highFront - 0.06]],
       [[side * (lowW + 0.014), lowY, split - 0.045], [side * (lowW + 0.014), lowY, lowRear + 0.07], [side * (highW + 0.014), highY, highRear + 0.06], [side * (highW + 0.014), highY, split - 0.045]],
-    ];
+    ] : [[[side*(lowW+.014),lowY,lowFront-.07],[side*(lowW+.014),lowY,lowRear+.07],[side*(highW+.014),highY,highRear+.06],[side*(highW+.014),highY,highFront-.06]]];
+    if(side<0)for(const face of glassFaces)face.reverse();
     const pane = poly('door-glass-panes', glassFaces, glass, door);
+    if(buggy) pane.setEnabled(false);
     pane.position.copyFrom(door.position).negateInPlace();
     const crackFrom: Point = [side * (lerp(lowW, highW, 0.5) + 0.027), lerp(lowY, highY, 0.5), cabinCenter + 0.22];
     for (const z of [lowFront - 0.17, split + 0.12]) {
       const crack = segment('side-glass-crack', crackFrom, [side * (highW + 0.028), highY - 0.025, z], 0.018, crackMat, pane);
       crack.setEnabled(false); cracks.push(crack);
     }
-    box('door-handle', 0.03, 0.045, 0.17, side * 0.06, 0.12, -0.21, metal, door);
+    if(!buggy)box('door-handle',.03,.045,.17,side*.06,van?.23:.12,-.21,dark,door);
     box('mirror-arm', 0.19, 0.055, 0.07, side * 0.11, 0.34, frontBottom - cabinCenter - 0.15, dark, door);
     box('mirror', 0.13, 0.13, 0.22, side * 0.22, 0.35, frontBottom - cabinCenter - 0.15, dark, door);
-    if (kind === 'police') box('police-door-band', 0.018, 0.16, 1.1, side * 0.056, 0.01, 0, black, door);
+    if (kind === 'police') {
+      box('police-door-band',.018,.16,Math.min(1.6,frontBottom-rearBottom-.2),side*.056,van?.32:.01,0,role==='swat'?metal:black,door);
+      const badge=MeshBuilder.CreateCylinder('police-door-badge',{diameter:.25,height:.018,tessellation:6},scene);badge.rotation.z=Math.PI/2;badge.position.set(side*.07,van?.37:.08,.02);register(badge,role==='swat'?black:exposed,door);
+    }
     scratch('broad-door-scrape', [side * 0.06, -0.08, -0.61], [side * 0.06, 0.12, 0.57], door, 0.06);
     scratch('lower-door-scrape', [side * 0.064, -0.14, -0.43], [side * 0.064, -0.015, 0.63], door, 0.035);
     scratch('dark-door-gouge', [side * 0.064, -0.015, -0.56], [side * 0.064, 0.19, 0.48], door, 0.035, dark);
@@ -192,30 +222,49 @@ export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 
   scratch('bonnet-long-scrape', [-w * 0.25, 0.058, -hoodDepth * 0.33], [w * 0.25, 0.058, hoodDepth * 0.3], hood, 0.045);
   scratch('bonnet-short-scrape', [-w * 0.14, 0.06, -hoodDepth * 0.4], [w * 0.3, 0.06, hoodDepth * 0.07], hood, 0.03);
   if (pickup) {
-    box('bed-floor', w * 0.69, 0.045, trunkDepth, 0, chassisY + 0.075, trunkCenter, dark);
+    box('bed-floor', bodyWidth*.88, .045, trunkDepth, 0, chassisY+.075, trunkCenter, dark);
     for (const side of [-1, 1]) {
-      box('bed-rail', 0.14, 0.21, trunkDepth, side * w * 0.405, chassisY + 0.31, trunkCenter, paint);
-      box('bed-rail-cap', 0.16, 0.045, trunkDepth, side * w * 0.405, chassisY + 0.43, trunkCenter, dark);
+      box('bed-rail', .16, .31, trunkDepth, side*bodyHalf*.94, chassisY+.31, trunkCenter, paint);
+      box('bed-rail-cap', .18, .045, trunkDepth, side*bodyHalf*.94, chassisY+.49, trunkCenter, dark);
       box('bullbar-leg', 0.09, 0.34, 0.1, side * w * 0.31, 0.08, 0.13, metal, frontBumper);
     }
     box('bullbar-cross', w * 0.68, 0.09, 0.1, 0, 0.22, 0.13, metal, frontBumper);
     box('hood-power-bulge', 0.81, 0.09, hoodDepth * 0.7, 0, 0.09, 0, paint, hood);
     box('hood-intake', 0.5, 0.08, 0.1, 0, 0.1, hoodDepth * 0.33, dark, hood);
   } else if (rally) {
-    box('rally-hood-stripe', w * 0.38, 0.014, hoodDepth * 0.85, 0, 0.058, 0, dark, hood);
-    box('rally-roof-vent', 0.38, 0.1, 0.34, 0, roofY + 0.1, -0.45, dark);
+    box('safari-hood-panel',bodyWidth*.33,.014,hoodDepth*.60,0,.058,0,dark,hood);
+    box('safari-roof-panel',topW*1.98,.035,frontTop-rearTop+.03,0,roofY+.065,(frontTop+rearTop)*.5,exposed);
     for (const side of [-1, 1]) {
-      box('rally-fender-front', 0.15, 0.13, 0.92, side * w * 0.46, chassisY + 0.04, l * 0.3, dark);
-      box('rally-fender-rear', 0.15, 0.13, 0.92, side * w * 0.46, chassisY + 0.04, -l * 0.3, dark);
       box('rally-lamp', 0.23, 0.19, 0.1, side * 0.27, 0.27, 0.03, lights, frontBumper);
+      box('safari-roof-rail',.07,.11,frontTop-rearTop+.08,side*topW*.86,roofY+.15,(frontTop+rearTop)*.5,dark);
+      box('side-step',.20,.11,l*.45,side*bodyHalf*1.10,.51,0,dark);
     }
-    box('rally-spoiler', w * 0.75, 0.065, 0.24, 0, 0.22, -trunkDepth * 0.32, dark, trunk);
+    box('roof-front-crossbar',topW*1.78,.07,.07,0,roofY+.15,frontTop,dark);
+    box('roof-rear-crossbar',topW*1.78,.07,.07,0,roofY+.15,rearTop,dark);
+    const spare=MeshBuilder.CreateCylinder('safari-spare-tire',{diameter:.76,height:.22,tessellation:12},scene);spare.rotation.x=Math.PI/2;spare.position.set(0,1.24,-l*.49-.14);register(spare,dark,chassis,true);
+    const spareRim=MeshBuilder.CreateCylinder('safari-spare-rim',{diameter:.40,height:.025,tessellation:8},scene);spareRim.rotation.x=Math.PI/2;spareRim.position.set(0,1.24,-l*.49-.266);register(spareRim,metal,chassis,true);
+  } else if(buggy) {
+    for(const side of [-1,1]) {
+      segment('buggy-roll-cage',[side*baseW,cabinBottom,rearBottom],[side*topW,roofY+.08,rearTop],.105,dark,chassis,true);
+      segment('buggy-side-crash-bar',[side*baseW,cabinBottom-.10,frontBottom],[side*baseW,cabinBottom-.10,rearBottom],.075,metal,chassis,true);
+      box('buggy-hood-vent',.12,.014,hoodDepth*.58,side*.17,.059,0,dark,hood);
+    }
+    box('buggy-rear-engine',bodyWidth*.58,.25,.45,0,chassisY+.25,trunkCenter,metal);
+  } else if(van) {
+    for(const side of [-1,1]) {
+      box('armored-body-plate',.07,.37,l*.30,side*bodyHalf*1.02,chassisY+.21,-l*.13,black);
+      box('van-side-step',.22,.12,l*.60,side*bodyHalf*1.1,.48,-.08,dark);
+      box('roof-armored-rail',.10,.10,l*.67,side*topW*.90,roofY+.09,-l*.02,dark);
+    }
+  } else if(coupe||muscle) {
+    for(const side of [-1,1])box('sports-hood-stripe',muscle?.16:.10,.014,hoodDepth*.89,side*.20,.058,0,dark,hood);
+    if(muscle){box('muscle-hood-scoop',.58,.13,hoodDepth*.47,0,.11,0,paint,hood);box('scoop-opening',.43,.075,.02,0,.14,hoodDepth*.235+.014,dark,hood);}
+    box('sports-ducktail',bodyWidth*.92,.065,.23,0,.14,-trunkDepth*.28,dark,trunk);
   } else {
     for (const side of [-1, 1]) {
-      box('hood-stripe', 0.12, 0.012, hoodDepth * 0.91, side * 0.17, 0.057, 0, kind === 'police' ? black : dark, hood);
-      box('spoiler-stay', 0.055, 0.13, 0.07, side * 0.49, 0.1, -trunkDepth * 0.28, dark, trunk);
+      box('hood-highlight',bodyWidth*.40,.012,.16,side*bodyWidth*.20,.057,hoodDepth*.33,kind==='police'?black:exposed,hood);
     }
-    box('rear-spoiler', w * 0.79, 0.06, 0.24, 0, 0.18, -trunkDepth * 0.28, paint, trunk);
+    box('rear-hatch-lip',bodyWidth*.90,.055,.15,0,.085,-trunkDepth*.24,paint,trunk);
   }
 
   // Outlet markers point local +Z rearward, so VFX can follow chassis lean naturally.
@@ -229,24 +278,33 @@ export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 
     outlet.position.set(x, chassisY - 0.12, -l * 0.485 - 0.27); outlet.rotation.y = Math.PI;
     exhausts.push(outlet);
   }
-  const wheelRadius = pickup ? 0.46 : rally ? 0.44 : 0.39, axle = l * (pickup ? 0.32 : 0.305);
   for (const z of [axle, -axle]) for (const side of [-1, 1]) {
-    const frame = new TransformNode('wheel-frame', scene); frame.parent = root; frame.position.set(side * w * 0.475, wheelRadius + 0.035, z);
+    const frame = new TransformNode('wheel-frame', scene); frame.parent = root; frame.position.set(side*wheelX,wheelRadius+.025,z);
     const wheel = new TransformNode('wheel', scene); wheel.parent = frame;
     wheels.push(wheel); wheelFrames.push(frame); wheelHeights.push(frame.position.y);
-    const tire = MeshBuilder.CreateCylinder('low-poly-tire', { diameter: wheelRadius * 2, height: pickup ? 0.34 : 0.27, tessellation: 12 }, scene);
+    const tire = MeshBuilder.CreateCylinder('low-poly-tire', { diameter: wheelRadius * 2, height: wheelWidth, tessellation: 12 }, scene);
     tire.rotation.z = Math.PI / 2; register(tire, dark, wheel);
-    const rim = MeshBuilder.CreateCylinder('alloy-wheel', { diameter: wheelRadius * 1.12, height: pickup ? 0.35 : 0.28, tessellation: 8 }, scene);
-    rim.rotation.z = Math.PI / 2; register(rim, metal, wheel);
+    const rim = MeshBuilder.CreateCylinder('recessed-wheel-disc', { diameter: wheelRadius*1.20, height: wheelWidth+.012, tessellation: 12 }, scene);
+    rim.rotation.z = Math.PI / 2; register(rim,black,wheel);
+    register(conceptWheelRing(scene,'faceted-alloy-rim',wheelRadius*.49,wheelRadius*.63,wheelWidth+.027),metal,wheel);
+    for(let i=0;i<5;i++) {
+      const a=i*Math.PI*2/5, center=wheelRadius*.35;
+      const spoke=box('alloy-spoke',.027,wheelRadius*.35,.06,side*(wheelWidth/2+.026),Math.cos(a)*center,Math.sin(a)*center,metal,wheel);
+      spoke.rotation.x=a;
+    }
     const hub = MeshBuilder.CreateCylinder('wheel-hub', { diameter: wheelRadius * 0.43, height: 0.025, tessellation: 6 }, scene);
-    hub.position.x = side * (pickup ? 0.19 : 0.155); hub.rotation.z = Math.PI / 2; register(hub, dark, wheel);
+    hub.position.x=side*(wheelWidth/2+.045);hub.rotation.z=Math.PI/2;register(hub,metal,wheel);
+    if(rally||pickup||buggy||van)for(let i=0;i<12;i++){
+      const a=i*Math.PI/6, tread=box('offroad-tread',wheelWidth*.90,.028,wheelRadius*.22,0,Math.cos(a)*(wheelRadius-.005),Math.sin(a)*(wheelRadius-.005),dark,wheel);tread.rotation.x=a;
+    }
+    const arch=conceptArch(scene,'open-fender-arch',wheelRadius+.025,wheelRadius+.105,wheelWidth*.65);arch.position.set(side*(wheelX-.025),wheelRadius+.025,z);register(arch,dark,chassis,true);
   }
   // Yaw uses the returned node; pitch is isolated in the named child pivot.
-  turret.position.set(0, roofY + 0.09, pickup ? 0.04 : -0.16);
+  turret.position.set(0,roofY+.09,pickup?.04:(frontTop+rearTop)*.5);
   if (kind === 'player') {
-    const ring = MeshBuilder.CreateCylinder('turret-ring', { diameter: 0.75, height: 0.14, tessellation: 10 }, scene);
+    const ring = MeshBuilder.CreateCylinder('turret-ring', { diameter: .53, height: .11, tessellation: 12 }, scene);
     ring.position.y = 0.025; register(ring, dark, turret);
-    box('turret-armor', 0.57, 0.26, 0.62, 0, 0.16, -0.03, paint, turret);
+    box('turret-armor', .48, .23, .54, 0, .17, -.025, paint, turret);
     const elevation = new TransformNode('turret-elevation', scene); elevation.parent = turret; elevation.position.set(0, 0.18, 0.23);
     box('turret-mantlet', 0.29, 0.23, 0.22, 0, 0, 0.04, metal, elevation);
     const barrel = MeshBuilder.CreateCylinder('turret-barrel', { diameter: 0.12, height: 1.12, tessellation: 8 }, scene);
@@ -254,14 +312,19 @@ export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 
     box('turret-top-rail', 0.065, 0.05, 0.7, 0, 0.075, 0.53, metal, elevation);
     box('muzzle-brake', 0.19, 0.17, 0.18, 0, 0, 1.21, dark, elevation);
     box('muzzle-opening', 0.1, 0.085, 0.012, 0, 0, 1.307, black, elevation);
+    turret.setEnabled(false);
   } else if (kind === 'police') {
     box('black-hood', w * 0.72, 0.013, hoodDepth * 0.9, 0, 0.058, 0, black, hood);
-    box('lightbar-base', w * 0.7, 0.08, 0.24, 0, roofY + 0.09, -0.21, dark);
-    box('red-lightbar', w * 0.3, 0.13, 0.19, -w * 0.18, roofY + 0.185, -0.21, red);
-    box('blue-lightbar', w * 0.3, 0.13, 0.19, w * 0.18, roofY + 0.185, -0.21, blue);
+    box('lightbar-base',topW*1.75,.08,.24,0,roofY+.09,cabinCenter,dark);
+    box('red-lightbar',topW*.73,.13,.19,-topW*.46,roofY+.185,cabinCenter,red);
+    box('blue-lightbar',topW*.73,.13,.19,topW*.46,roofY+.185,cabinCenter,blue);
+    if(role==='swat'||role==='suv'){
+      for(const side of [-1,1]){box('police-pushbar-upright',.08,.36,.08,side*bodyWidth*.32,.13,.17,metal,frontBumper);}
+      box('police-pushbar-cross',bodyWidth*.67,.07,.08,0,.30,.17,metal,frontBumper);
+    }
     const glyphs: Record<string, string[]> = { P: ['110', '101', '110', '100', '100'], O: ['111', '101', '101', '101', '111'], L: ['100', '100', '100', '100', '111'], I: ['111', '010', '010', '010', '111'], C: ['111', '100', '100', '100', '111'], E: ['111', '100', '110', '100', '111'] };
     const unit = w * 0.026;
-    for (let letter = 0; letter < 6; letter++) { const rows = glyphs['POLICE'[letter]]; for (let r = 0; r < rows.length; r++) for (let c = 0; c < rows[r].length; c++) if (rows[r][c] === '1') box('police-label-pixel', unit * 0.9, 0.008, unit * 0.9, (letter * 4 + c - 11) * unit, roofY + 0.053, 0.15 - r * unit, black); }
+    for (let letter=0;letter<6;letter++){const rows=glyphs['POLICE'[letter]];for(let r=0;r<rows.length;r++)for(let c=0;c<rows[r].length;c++)if(rows[r][c]==='1')box('police-label-pixel',unit*.9,.008,unit*.9,(letter*4+c-11)*unit,roofY+.053,frontTop-.20-r*unit,role==='swat'?exposed:black);}
   }
   let body: Mesh | undefined;
   for (const [mat, meshes] of batches) {
@@ -301,7 +364,7 @@ export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 
       }
     }
   }
-  for (const part of [hood, trunk, frontBumper, rearBumper, windshield, ...doors, turret]) batchAttachedChildren(part);
+  for (const part of [hood,trunk,frontBumper,rearBumper,windshield,...doors,turret,...wheels]) batchAttachedChildren(part);
   const originalMeshes = root.getChildMeshes().filter(mesh => mesh instanceof Mesh) as Mesh[];
   const shadow = (scene.metadata as { shadowGenerator?: ShadowGenerator } | null)?.shadowGenerator;
 
@@ -389,10 +452,15 @@ export function createVehicle(scene: Scene, spec: CarSpec, color: string, kind: 
     for (const mesh of scratches) mesh.setEnabled(false);
     for (const mesh of cracks) mesh.setEnabled(false);
     for (const mesh of shards) mesh.setEnabled(false);
+    if(buggy)rearWindow.setEnabled(false);
     paint.diffuseColor.copyFrom(baseColor);
   }
   return {
     root, chassis, body, turret, wheels, exhausts,
+    setTurretEnabled(enabled: boolean): void {
+      const next=kind==='player'&&enabled;if(next===turretEnabled)return;
+      invalidateCompact();turretEnabled=next;turret.setEnabled(next);showCompact();
+    },
     setColor(hex: string): void { invalidateCompact(); baseColor = Color3.FromHexString(hex); if (stage < 4) paint.diffuseColor.copyFrom(baseColor); else Color3.LerpToRef(baseColor, charredColor, 0.88, paint.diffuseColor); showCompact(); },
     setCompact(enabled: boolean): void { compactRequested = enabled; if (enabled) showCompact(); else invalidateCompact(); },
     setDamage(healthRatio: number, tiresRatio: number): void {

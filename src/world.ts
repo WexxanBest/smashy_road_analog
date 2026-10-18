@@ -1,5 +1,6 @@
-import { Color3, Mesh, Scene, StandardMaterial, VertexBuffer, VertexData, type ShadowGenerator } from '@babylonjs/core';
+import { Color3, Mesh, Scene, StandardMaterial, TransformNode, Vector3, VertexBuffer, VertexData, type ShadowGenerator } from '@babylonjs/core';
 import type { Biome, GarageLocation, ParkedSpawn, RoadSample, RoadSpawn, SurfaceKind, World, WorldProp } from './types';
+import { createWorldInteractions, type PropOptions } from './world-interactions';
 
 const CHUNK = 72;
 const ROAD = 12;
@@ -8,7 +9,7 @@ const NS_GAP = 960;
 const EW_GAP = 1100;
 const LOCAL = [-104, -48, 48, 104];
 const STREETS = [-104, -48, 0, 48, 104];
-type Chunk = { x: number; z: number; mesh: Mesh; props: WorldProp[] };
+type Chunk = { x: number; z: number; mesh: Mesh; props: WorldProp[]; visuals: WorldProp[] };
 type Point = { x: number; z: number };
 type District = Point & { id: string; enabled: boolean };
 type GarageSite = GarageLocation & { id: string; rotation: number };
@@ -49,8 +50,6 @@ function random(seed: number): () => number {
 /** A streamed, seeded road network. Static scenery and emissive panels use two batches per urban tile. */
 export function createWorld(scene: Scene, seed: number): World {
   const chunks = new Map<string, Chunk>();
-  const destroyed = new Set<string>();
-  const propIds = new WeakMap<WorldProp, string>();
   const material = new StandardMaterial('world-vertex-colors', scene);
   material.diffuseColor = Color3.White();
   material.specularColor = Color3.Black();
@@ -66,6 +65,7 @@ export function createWorld(scene: Scene, seed: number): World {
   const arrowRanges = new WeakMap<Mesh,ArrowRange[]>();
   let disposed = false;
   const shadow = (scene.metadata as { shadowGenerator?: ShadowGenerator } | null)?.shadowGenerator;
+  const interactions = createWorldInteractions(scene, shadow);
   const garages: GarageSite[] = [];
   const districts = new Map<string, District>();
   const accesses = new Map<string, Access | null>();
@@ -443,11 +443,7 @@ export function createWorld(scene: Scene, seed: number): World {
     if(arrows.length)arrowRanges.set(mesh,arrows);
     return mesh;
   }
-  function collision(list: WorldProp[], id: string, x: number, z: number, radius: number, visual?: Mesh, breakable = false, hp = 50): void {
-    if (breakable && destroyed.has(id)) {
-      visual?.dispose();
-      return;
-    }
+  function collision(list: WorldProp[], id: string, x: number, z: number, radius: number, visual?: Mesh, breakable = false, hp = 50, options: PropOptions = {}): WorldProp {
     const mesh = visual ?? new Mesh('collision-' + id, scene);
     if (!visual) {
       mesh.position.set(x, -20, z);
@@ -457,8 +453,9 @@ export function createWorld(scene: Scene, seed: number): World {
       shadow?.addShadowCaster(mesh);
     }
     const prop: WorldProp = { x, z, radius, mesh, breakable, hp, active: true };
-    propIds.set(prop, id);
+    interactions.register(prop, id, options, !!visual);
     list.push(prop);
+    return prop;
   }
   function tree(props: WorldProp[], id: string, x: number, z: number, r: () => number, autumn = false, scale = 1): void {
     const meshes: Part[] = [];
@@ -467,7 +464,7 @@ export function createWorld(scene: Scene, seed: number): World {
     box(meshes,x,.14,z,1.65,.28,1.65,'#a59e80');box(meshes,x,.295,z,1.32,.035,1.32,'#728764');
     crown(meshes,x,height*.71,z,height*.72,height*.67,height*.68,autumn?'#b8ae5e':'#6b874a',r()*2);
     crown(meshes,x+.48,height*.88,z+.25,height*.45,height*.44,height*.48,autumn?'#c2b76c':'#8fa75c',r()*2);
-    collision(props, id, x, z, 0.65, merge(meshes, 'tree'), true, 28);
+    collision(props, id, x, z, 0.65, merge(meshes, 'tree'), true, 70, { kind: 'tree', height, mass: 260 });
   }
   function fence(props: WorldProp[], id: string, x: number, z: number, length: number, alongZ = false): void {
     const pieces: Part[] = [];
@@ -477,7 +474,11 @@ export function createWorld(scene: Scene, seed: number): World {
     for (let i = -1; i <= 1; i++) box(pieces, x + (alongZ ? 0 : i * length * 0.45), 0.64, z + (alongZ ? i * length * 0.45 : 0), 0.19, 1.28, 0.19, '#8c7b60');
     collision(props, id, x, z, length * 0.38, merge(pieces, 'breakable-fence'), true, 25);
   }
-  function building(meshes: Part[], props: WorldProp[], id: string, x: number, z: number, w: number, d: number, h: number, color: string, r: () => number): void {
+  function building(_background: Part[], props: WorldProp[], id: string, x: number, z: number, w: number, d: number, h: number, color: string, r: () => number): void {
+    // A building is one static object, rather than part of the ground batch.
+    // Its lower window bays and canopies are independently damageable objects.
+    const meshes: Part[] = [];
+    const storefronts = new Map<number, Part[]>();
     box(meshes, x, h * 0.5, z, w, h, d, color);
     box(meshes, x, .35, z, w+.28, .6, d+.28, '#aea58f');
     box(meshes, x, h+.12, z, w+.6, .28, d+.6, '#ded6bd');
@@ -491,13 +492,20 @@ export function createWorld(scene: Scene, seed: number): World {
     const floors = Math.max(1, Math.floor((h-.25) / 2.7));
     const window=(px:number,pz:number,y:number,rotation:number,lit:boolean)=>{
       const site={x:px,z:pz,rotation};
-      panel(meshes,px,y,pz,1.92,1.65,'#eee0bf',rotation);
+      let parts = meshes;
+      if (y < 3) {
+        parts = storefronts.get(rotation) ?? []; storefronts.set(rotation, parts);
+        // A dark recess survives broken glass instead of exposing a blank wall.
+        const recess = localPoint(site, 0, .008);
+        panel(meshes,recess.x,y,recess.z,1.56,1.36,'#273c38',rotation);
+      }
+      panel(parts,px,y,pz,1.92,1.65,'#eee0bf',rotation);
       const glass=localPoint(site,0,-.018);
-      panel(meshes,glass.x,y,glass.z,1.5,1.3,lit?'#ffd590':'#526b6b',rotation,lit);
+      panel(parts,glass.x,y,glass.z,1.5,1.3,lit?'#ffd590':'#526b6b',rotation,lit);
       const mullion=localPoint(site,0,-.034);
-      panel(meshes,mullion.x,y,mullion.z,.075,1.3,'#c7ae86',rotation);
+      panel(parts,mullion.x,y,mullion.z,.075,1.3,'#c7ae86',rotation);
       const sill=localPoint(site,0,-.09);
-      box(meshes,sill.x,y-.85,sill.z,2.02,.12,.28,'#e8ddc2',rotation);
+      box(parts,sill.x,y-.85,sill.z,2.02,.12,.28,'#e8ddc2',rotation);
     };
     for (let floor = 0; floor < floors; floor++) {
       const y = 1.7 + floor * 2.7;
@@ -527,19 +535,22 @@ export function createWorld(scene: Scene, seed: number): World {
     box(meshes,x,h+.72,z-1.4,w*.5,.64,1.1,'#a8ad9f');
     const awningColor=r()>.5?'#a85843':'#3c7060';
     const awning=(px:number,pz:number,width:number,rotation:number,label:string)=>{
+      const canopy: Part[] = [];
       const site={x:px,z:pz,rotation};
       const at=(u:number,v:number)=>localPoint(site,u,v);
       for(let a=-width/2;a<width/2-.01;a+=.7) {
         const stripe=Math.min(.7,width/2-a),shade=Math.round((a+width/2)/.7)%2===0?awningColor:'#ede4c7';
         const p=at(a+stripe/2,-.76);
-        box(meshes,p.x,2.84,p.z,stripe,.09,1.62,shade,rotation).rotation.x=-.16;
+        box(canopy,p.x,2.84,p.z,stripe,.09,1.62,shade,rotation).rotation.x=-.16;
         const edge=at(a+stripe/2,-1.57);
-        box(meshes,edge.x,2.59,edge.z,stripe,.3,.075,shade,rotation);
+        box(canopy,edge.x,2.59,edge.z,stripe,.3,.075,shade,rotation);
       }
       const sign=at(0,-.12);
-      box(meshes,sign.x,3.36,sign.z,Math.min(width,8.2),.75,.16,'#425e53',rotation);
+      box(canopy,sign.x,3.36,sign.z,Math.min(width,8.2),.75,.16,'#425e53',rotation);
       const face=at(0,-.215);
-      lettering(meshes,label,face.x,3.37,face.z,.112,'#ffe1a6',rotation,true);
+      lettering(canopy,label,face.x,3.37,face.z,.112,'#ffe1a6',rotation,true);
+      const center=at(0,-.7);
+      collision(props,id+'-awning-'+rotation,center.x,center.z,width*.5,merge(canopy,'shop-awning'),true,75,{kind:'awning',interaction:'facade',height:3.8,mass:120,width,depth:1.8,angle:rotation,group:id});
     };
     awning(x,z-d/2-.06,w*.78,0,r()>.5?'MARKET':'CAFE');
     if(r()>.4)awning(x+w/2+.06,z,d*.66,-Math.PI/2,'24');
@@ -555,7 +566,12 @@ export function createWorld(scene: Scene, seed: number): World {
       box(meshes,sx,3.5,sz,.28,.14,.56,'#506657');
       litBox(meshes,sx,3.38,sz-.14,.24,.18,.25,'#ffe1a2');
     }
-    collision(props, id, x, z, Math.max(w, d) / 1.6);
+    for(const [rotation,parts] of storefronts) {
+      const sideZ=Math.abs(Math.sin(rotation))<.5;
+      const sx=x-Math.sin(rotation)*(w/2+.05),sz=z-Math.cos(rotation)*(d/2+.05);
+      collision(props,id+'-glass-'+rotation,sx,sz,(sideZ?w:d)*.5,merge(parts,'shop-window-bays'),true,65,{kind:'storefront',interaction:'facade',height:2.6,mass:35,width:sideZ?w:d,depth:.3,angle:rotation,group:id});
+    }
+    collision(props, id, x, z, Math.max(w, d) / 1.6,merge(meshes,'city-building'),false,1200,{kind:'building',interaction:'solid',height:h+2.2,mass:50000,width:w,depth:d,group:id});
   }
   function garage(meshes: Part[], props: WorldProp[], id: string, x: number, z: number): void {
     // The entire apron and bay remain driveable; side pillars and rear wall collide.
@@ -700,7 +716,7 @@ export function createWorld(scene: Scene, seed: number): World {
     }
     return routes;
   }
-  function roads(meshes: Part[], x: number, z: number): void {
+  function roads(meshes: Part[], props: WorldProp[], x: number, z: number): void {
     const routes=roadRoutes(x,z),d=nearbyDistrict(x,z),lots=d?parkingLots(d):[];
     const entranceClear=(p:Point)=>!lots.some(lot=>segmentRoad(lot.entrance,lot.street,p.x,p.z,5.6).distance<3.2);
     for(const route of routes) {
@@ -758,17 +774,21 @@ export function createWorld(scene: Scene, seed: number): World {
       if(ix>0&&ix<4&&iz>0&&iz<4)for(const [sideX,sideZ] of[[-1,-1],[1,1],[-1,1],[1,-1]]) {
         const sx=px+sideX*(verticalWidth/2+1.9),sz=pz+sideZ*(horizontalWidth/2+1.9);
         if(!owned(sx,sz,Math.round(x/CHUNK),Math.round(z/CHUNK))||!clearSpace(sx,sz,.18))continue;
-        cylinder(meshes,sx,.24,sz,.6,.43,'#a79f86',.5,6);
-        cylinder(meshes,sx,2.4,sz,.2,4.55,'#3f594b',.15,6);
+        const lights: Part[]=[];
+        cylinder(lights,sx,.24,sz,.6,.43,'#a79f86',.5,6);
+        cylinder(lights,sx,2.4,sz,.2,4.55,'#3f594b',.15,6);
         const rotation=sideX===sideZ?(sideX>0?Math.PI:0):(sideX>0?-Math.PI/2:Math.PI/2),front=localPoint({x:sx,z:sz,rotation},0,-.22);
-        box(meshes,sx,4.05,sz,.63,1.45,.38,'#293e33',rotation);
+        box(lights,sx,4.05,sz,.63,1.45,.38,'#293e33',rotation);
         const green=hash(ix,iz,seed+8)>.5;
-        for(let light=0;light<3;light++)panel(meshes,front.x,4.49-light*.42,front.z,.3,.3,light===2?(green?'#bde985':'#526552'):light===0?(!green?'#ef9273':'#68574a'):'#8e8059',rotation,(light===2&&green)||(light===0&&!green));
+        for(let light=0;light<3;light++)panel(lights,front.x,4.49-light*.42,front.z,.3,.3,light===2?(green?'#bde985':'#526552'):light===0?(!green?'#ef9273':'#68574a'):'#8e8059',rotation,(light===2&&green)||(light===0&&!green));
+        collision(props,`signal-${d.id}-${ix}-${iz}-${sideX}-${sideZ}`,sx,sz,.4,merge(lights,'traffic-light'),true,65,{kind:'traffic-light',height:4.8,mass:130});
         // Short bollards guard sidewalk corners while leaving zebra approaches open.
         const bx=sx-sideX*.85,bz=sz+sideZ*1.2;
         if(clearSpace(bx,bz,.08)) {
-          cylinder(meshes,bx,.65,bz,.23,1.2,'#405e49',.23,6);
-          cylinder(meshes,bx,1.12,bz,.25,.16,'#dfd7ae',.25,6);
+          const bollard:Part[]=[];
+          cylinder(bollard,bx,.65,bz,.23,1.2,'#405e49',.23,6);
+          cylinder(bollard,bx,1.12,bz,.25,.16,'#dfd7ae',.25,6);
+          collision(props,`bollard-${d.id}-${ix}-${iz}-${sideX}-${sideZ}`,bx,bz,.18,merge(bollard,'bollard'),true,35,{kind:'bollard',mass:50});
         }
       }
     }
@@ -776,11 +796,13 @@ export function createWorld(scene: Scene, seed: number): World {
       const road=route.sample(t),p={x:road.x+Math.cos(road.angle)*side*(route.width/2+2.1),z:road.z-Math.sin(road.angle)*side*(route.width/2+2.1)};
       if(!owned(p.x,p.z,Math.round(x/CHUNK),Math.round(z/CHUNK))||biomeAt(p.x,p.z)!=='city'||!clearSpace(p.x,p.z,.1))continue;
       const rotation=road.angle+(side<0?Math.PI:0),head=localPoint({x:p.x,z:p.z,rotation},-.6,0);
-      cylinder(meshes,p.x,.15,p.z,.4,.3,'#aba68e',.32,6);
-      cylinder(meshes,p.x,2.65,p.z,.15,5.3,'#56685b',.105,6);
-      box(meshes,head.x,5.22,head.z,1.45,.11,.15,'#56685b',rotation);
-      box(meshes,head.x,5.18,head.z,.78,.18,.43,'#63755e',rotation);
-      litBox(meshes,head.x,5.075,head.z,.64,.045,.32,'#ffe1a2',rotation);
+      const lamp:Part[]=[];
+      cylinder(lamp,p.x,.15,p.z,.4,.3,'#aba68e',.32,6);
+      cylinder(lamp,p.x,2.65,p.z,.15,5.3,'#56685b',.105,6);
+      box(lamp,head.x,5.22,head.z,1.45,.11,.15,'#56685b',rotation);
+      box(lamp,head.x,5.18,head.z,.78,.18,.43,'#63755e',rotation);
+      litBox(lamp,head.x,5.075,head.z,.64,.045,.32,'#ffe1a2',rotation);
+      collision(props,`lamp-${route.id}-${t}-${side}`,p.x,p.z,.3,merge(lamp,'street-lamp'),true,65,{kind:'lamp',height:5.4,mass:150});
     }
     // Stable roadside rhythm: posts, signs, low shrubs. Everything stays beyond the lanes.
     for(const route of routes.filter(r=>r.width===ROAD))for(let t=Math.ceil(route.from/42)*42;t<route.to;t+=42) {
@@ -789,9 +811,11 @@ export function createWorld(scene: Scene, seed: number): World {
       if(!owned(p.x,p.z,Math.round(x/CHUNK),Math.round(z/CHUNK))||!clearSpace(p.x,p.z,.25))continue;
       if(biomeAt(p.x,p.z)==='city')continue;
       const kind=hash(Math.round(t),route.id.charCodeAt(0),seed+19);
-      if(kind<.45){cylinder(meshes,p.x,.6,p.z,.13,1.2,'#dddcc5',.13,5);box(meshes,p.x,.92,p.z,.15,.16,.15,'#ce795d');}
-      else if(kind<.72){cylinder(meshes,p.x,1.3,p.z,.13,2.6,'#73857b',.13,5);box(meshes,p.x,2.35,p.z,1.6,.7,.12,'#8ca69a',road.angle);box(meshes,p.x,2.35,p.z-.08,1,.1,.04,'#e0dfbc',road.angle);}
-      else for(let n=0;n<3;n++)cylinder(meshes,p.x+n*.55,.35,p.z+(n%2)*.7,1.3,.8,biomeAt(p.x,p.z)==='desert'?'#a4a477':'#7e9969',.7,5);
+      const roadside:Part[]=[];
+      if(kind<.45){cylinder(roadside,p.x,.6,p.z,.13,1.2,'#dddcc5',.13,5);box(roadside,p.x,.92,p.z,.15,.16,.15,'#ce795d');}
+      else if(kind<.72){cylinder(roadside,p.x,1.3,p.z,.13,2.6,'#73857b',.13,5);box(roadside,p.x,2.35,p.z,1.6,.7,.12,'#8ca69a',road.angle);box(roadside,p.x,2.35,p.z-.08,1,.1,.04,'#e0dfbc',road.angle);}
+      else for(let n=0;n<3;n++)cylinder(roadside,p.x+n*.55,.35,p.z+(n%2)*.7,1.3,.8,biomeAt(p.x,p.z)==='desert'?'#a4a477':'#7e9969',.7,5);
+      collision(props,`roadside-${route.id}-${t}`,p.x,p.z,kind>.72?1:.3,merge(roadside,'roadside-prop'),true,kind>.72?20:35,{kind:kind>.72?'shrub':'sign',mass:25});
     }
   }
   function groundHeight(x: number, z: number): number { return -0.18 - (1 + Math.sin(x / 53) * Math.cos(z / 67)) * 0.16; }
@@ -851,17 +875,60 @@ export function createWorld(scene: Scene, seed: number): World {
       box(pieces,x,.12,z,1.45,.2,1.1,'#8d8066',angle);box(pieces,x-.18,.53,z,.8,.65,.8,'#bdab88',angle);box(pieces,x+.4,.4,z+.35,.55,.45,.6,'#a59375',angle);
     }
     for(const p of pieces){p.x=x+(p.x-x)*size;p.z=z+(p.z-z)*size;p.y*=size;p.width*=size;p.height*=size;p.depth*=size;}
-    collision(props,id,x,z,(kind<.25?1.2:.5)*size,merge(pieces,'street-furniture'),true,kind<.25?35:24);
+    collision(props,id,x,z,(kind<.25?1.2:.5)*size,merge(pieces,'street-furniture'),true,kind<.25?55:35,{kind:kind<.25?'bench':kind<.5?'bin':kind<.75?'hydrant':'crates',interaction:kind>=.25&&kind<.5||kind>=.75?'movable':'breakable',mass:kind<.25?90:kind<.5?45:75});
   }
-  function placeGarage(meshes: Part[], props: WorldProp[], site: GarageSite): void {
+  function themedObject(props:WorldProp[],id:string,x:number,z:number,kind:'barrel'|'hay'|'crates'|'gate'|'barrier'|'kiosk'|'container',angle=0):void {
+    const pieces:Part[]=[];
+    let radius=.65,hp=90,mass=60,height=1.25,width=1.2,depth=1.2;
+    let interaction:PropOptions['interaction']='movable';
+    if(kind==='barrel') {
+      cylinder(pieces,x,.66,z,.82,1.24,'#ab573b',.82,10);
+      for(const y of[.16,.65,1.12])cylinder(pieces,x,y,z,.86,.08,'#463e32',.86,10);
+      box(pieces,x,.69,z-.42,.38,.37,.025,'#e4be4e',angle);hp=40;mass=55;interaction='explosive';
+    } else if(kind==='hay') {
+      box(pieces,x,.62,z,1.65,1.15,1.25,'#bba15f',angle);
+      for(const side of[-1,1])box(pieces,x+side*.48,.65,z,.06,1.22,1.29,'#7a6b40',angle);
+      radius=.9;hp=120;mass=110;width=1.65;depth=1.25;
+    } else if(kind==='crates') {
+      for(const side of[-1,1])box(pieces,x+side*.42,.46,z,.78,.84,.9,'#9e7d51',angle);
+      box(pieces,x,.99,z,.72,.35,.8,'#b2996d',angle);
+      for(const side of[-1,1])box(pieces,x+side*.42,.46,z-.46,.66,.1,.05,'#594f36',angle);
+      hp=75;mass=80;radius=.95;width=1.7;
+    } else if(kind==='gate'||kind==='barrier') {
+      const length=kind==='gate'?4.5:3.3;
+      const site={x,z,rotation:angle};
+      for(const side of[-1,1]) {const p=localPoint(site,side*(length/2-.1),0);box(pieces,p.x,.65,p.z,.17,1.3,.27,'#6c7665',angle);}
+      box(pieces,x,.99,z,length,.38,.15,kind==='gate'?'#98aa8a':'#ce9657',angle);
+      box(pieces,x,.43,z,length,.12,.13,'#75846d',angle);
+      if(kind==='barrier')for(let i=-2;i<=2;i++){const p=localPoint(site,i*.55,-.09);box(pieces,p.x,1.0,p.z,.27,.32,.025,'#eee3b8',angle);}
+      radius=length*.42;hp=kind==='gate'?85:55;mass=90;interaction='breakable';width=length;depth=.35;
+    } else if(kind==='container') {
+      box(pieces,x,1.18,z,4.8,2.35,2.3,'#627e74',angle);
+      for(let i=-3;i<=3;i++) {const p=localPoint({x,z,rotation:angle},i*.58,-1.17);box(pieces,p.x,1.2,p.z,.07,2.17,.06,'#87988b',angle);}
+      radius=2.3;hp=550;mass=1100;height=2.4;width=4.8;depth=2.3;
+    } else {
+      box(pieces,x,1.45,z,4.8,2.9,3.5,'#a88362',angle);
+      box(pieces,x,3.03,z,5.25,.25,4,'#557e70',angle);
+      const front=localPoint({x,z,rotation:angle},0,-1.79);
+      box(pieces,front.x,1.55,front.z,3.2,1.25,.08,'#385d58',angle);
+      box(pieces,front.x,2.48,front.z,3.45,.38,.12,'#e0bc72',angle);
+      radius=2.4;hp=240;mass=1500;height=3.2;width=4.8;depth=3.5;interaction='breakable';
+    }
+    collision(props,id,x,z,radius,merge(pieces,'interactive-'+kind),true,hp,{kind:kind==='kiosk'?'small-building':kind,interaction,height,mass,width,depth,angle});
+  }
+  function placeGarage(meshes: Part[], props: WorldProp[], site: GarageSite, visuals:WorldProp[]): void {
     const local: Part[] = [], colliders: WorldProp[] = [];
     garage(local, colliders, 'garage-' + site.id, 0, 0);
     const c = Math.cos(site.rotation), s = Math.sin(site.rotation);
     for (const p of local) {
       const px = p.x, pz = p.z;
       p.x = site.x + c * px + s * pz; p.z = site.z - s * px + c * pz; p.rotation.y += site.rotation;
-      meshes.push(p);
+      if(p.y<.22&&p.height<.4)meshes.push(p);
     }
+    const shell=local.filter(p=>!(p.y<.22&&p.height<.4));
+    // The workshop's existing wall colliders keep its drive-through bay open.
+    // Its roof and shell participate in occlusion without adding a solid box.
+    collision(visuals,'garage-shell-'+site.id,site.x,site.z,11,merge(shell,'garage-shell'),false,6000,{kind:'garage',height:6.5,group:'garage-'+site.id});
     for (const p of colliders) {
       const px = p.x, pz = p.z;
       p.x = site.x + c * px + s * pz; p.z = site.z - s * px + c * pz;
@@ -874,8 +941,10 @@ export function createWorld(scene: Scene, seed: number): World {
       box(meshes, gx, 3.9, gz, 8, 0.35, 6, '#d9c9a7', site.rotation);
       for (const sign of [-1, 1]) {
         const px = gx + c * sign * 2.7, pz = gz - s * sign * 2.7;
-        box(meshes, px, 1, pz, 0.85, 2, 0.7, '#c38569', site.rotation);
-        collision(props, 'pump-' + site.id + sign, px, pz, 0.5);
+        const pump:Part[]=[];
+        box(pump, px, 1, pz, 0.85, 2, 0.7, '#c38569', site.rotation);
+        box(pump,px,1.35,pz-.37,.5,.35,.04,'#314d44',site.rotation);
+        collision(props, 'pump-' + site.id + sign, px, pz, 0.5,merge(pump,'fuel-pump'),true,85,{kind:'fuel-pump',interaction:'explosive',height:2,mass:250});
         cylinder(meshes, px, 2, pz + 1.5, 0.17, 4, '#d6ceb2', 0.17);
       }
     }
@@ -886,11 +955,11 @@ export function createWorld(scene: Scene, seed: number): World {
     const biome = biomeAt(x, z);
     const r = random((hash(cx, cz, seed) * 2147483647) | 0);
     const id = cx + ':' + cz;
-    const meshes: Part[] = [], props: WorldProp[] = [];
+    const meshes: Part[] = [], props: WorldProp[] = [], visuals:WorldProp[]=[];
     soilPatches.set(id, []);
     ground(meshes, x, z);
-    roads(meshes, x, z);
-    for (const site of garages) if (owned(site.x, site.z, cx, cz)) placeGarage(meshes, props, site);
+    roads(meshes, props, x, z);
+    for (const site of garages) if (owned(site.x, site.z, cx, cz)) placeGarage(meshes, props, site,visuals);
     const town = nearbyDistrict(x, z);
     if (town) {
       const palette = ['#d4c7ad', '#c7bca6', '#cdbba3', '#b8c5b8', '#c4b59b', '#c7bcae'];
@@ -911,13 +980,16 @@ export function createWorld(scene: Scene, seed: number): World {
             const px = bx + (i % 2 ? -1 : 1) * (5 + lr() * 4), pz = bz - 9 + i * 4.5;
             if (clearSpace(px, pz, 2)) tree(props, lotId + '-tree-' + i, px, pz, lr);
           }
-          box(meshes, bx + 4, 0.6, bz, 3, 0.3, 0.65, '#baa183');
+          furniture(props,lotId+'-park-bench',bx+4,bz,0,.1);
+          if(clearSpace(bx,bz+7,3))themedObject(props,lotId+'-kiosk',bx,bz+7,'kiosk');
+          if(clearSpace(bx-9,bz-10,2))themedObject(props,lotId+'-barrier',bx-9,bz-10,'barrier',Math.PI/2);
         } else if (kind > 0.79 && Math.abs(ox) > 40) {
           if (clearSpace(bx, bz, 14)) {
             forecourt(meshes,bx,bz,Math.abs(ox)>40?45:35,Math.abs(oz)>40?45:35);
             building(meshes, props, lotId, bx, bz, 23, 20, 5.2, '#b4b8a9', lr);
-            box(meshes, bx, 5.5, bz, 25, 0.35, 22, '#738b82');
-            for (let n = -1; n <= 1; n++) box(meshes, bx + n * 6, 1.7, bz - 10.05, 4.1, 3.4, 0.14, '#6f8984');
+            if(clearSpace(bx+16,bz+5,3))themedObject(props,lotId+'-container',bx+16,bz+5,'container',Math.PI/2);
+            for(const side of[-1,1])if(clearSpace(bx+side*7,bz-13,1.2))themedObject(props,lotId+'-barrel-'+side,bx+side*7,bz-13,'barrel');
+            if(clearSpace(bx-15,bz+6,1.5))themedObject(props,lotId+'-crates',bx-15,bz+6,'crates');
           }
         } else {
           const w = 21 + lr() * 6, d = 21 + lr() * 6;
@@ -969,6 +1041,7 @@ export function createWorld(scene: Scene, seed: number): World {
           if(clearSpace(rx,rz,Math.hypot(.7,d*.76)/2))box(meshes, rx, 0.1, rz, 0.7, 0.22, d * 0.76, row % 5 < 2.5 ? '#7d9559' : '#899d61', angle);
         }
         if (r() < 0.3 && clearSpace(px,pz-d*.55,6)) fence(props, id + '-field-fence', px, pz - d * 0.55, 11);
+        for(const side of[-1,1])if(clearSpace(px+side*w*.3,pz+d*.5,1.2))themedObject(props,id+'-field-hay-'+side,px+side*w*.3,pz+d*.5,'hay',angle);
       }
       if (r() < 0.4) {
         const gx = x + (r() - 0.5) * 28, gz = z + (r() - 0.5) * 28;
@@ -978,27 +1051,36 @@ export function createWorld(scene: Scene, seed: number): World {
           if (clearSpace(tx, tz, 2)) tree(props, id + '-grove-' + i, tx, tz, r, r() < 0.15);
         }
       }
-      if (r() < 0.09 && clearSpace(x - 18, z + 17, 9)) {
+      if (r() < 0.12 && clearSpace(x - 18, z + 17, 9)) {
         const wx = x - 18, wz = z + 17;
-        cylinder(meshes, wx, 4.5, wz, 1.3, 9, '#d1cfb7', 0.65, 6);
-        cylinder(meshes, wx, 9, wz - 0.8, 0.7, 1.3, '#c0c5b0', 0.6, 6).rotation.x = Math.PI / 2;
-        box(meshes, wx, 9, wz - 1.5, 0.35, 6.5, 0.18, '#e1dfc7').rotation.z = 0.45;
-        box(meshes, wx, 9, wz - 1.5, 0.35, 6.5, 0.18, '#e1dfc7').rotation.z = Math.PI / 2 + 0.45;
-        collision(props, id + '-windmill', wx, wz, 1);
+        const tower:Part[]=[], blades:Part[]=[];
+        cylinder(tower, wx, 4.5, wz, 1.3, 9, '#d1cfb7', 0.65, 8);
+        box(tower,wx,9,wz-.45,.9,.65,1.9,'#c0c5b0');
+        const hub=cylinder(blades,0,0,0,.65,.4,'#c0c5b0',.4,10); hub.rotation.x=Math.PI/2;
+        for(let blade=0;blade<3;blade++) {
+          const angle=blade*Math.PI*2/3;
+          const part=box(blades,-Math.sin(angle)*1.72,Math.cos(angle)*1.72,0,.3,3.3,.14,'#e1dfc7'); part.rotation.z=angle;
+          const tip=box(blades,-Math.sin(angle)*3.12,Math.cos(angle)*3.12,-.01,.22,.38,.17,'#b96d50'); tip.rotation.z=angle;
+        }
+        const prop=collision(props,id+'-windmill',wx,wz,.8,merge(tower,'wind-turbine'),true,450,{kind:'turbine',height:12.5,mass:1800});
+        const rotor=new TransformNode('wind-turbine-rotor',scene);rotor.parent=prop.mesh;rotor.position.set(0,9,-1.5);
+        const rotorMesh=merge(blades,'wind-turbine-blades');rotorMesh.unfreezeWorldMatrix();rotorMesh.parent=rotor;shadow?.addShadowCaster(rotorMesh);
+        interactions.attachRotor(prop,rotor);
       }
     } else if (biome === 'desert') {
       const px = x + (r() - 0.5) * 26, pz = z + (r() - 0.5) * 26;
       if (r() < 0.23 && clearSpace(px, pz, 14)) {
         // Stepped mesas and their smaller broken shelves give the desert a silhouette.
-        cylinder(meshes, px, 1.1, pz, 24, 2.2, '#bb926e', 20, 6).rotation.y = 0.2;
-        cylinder(meshes, px - 1.1, 3.4, pz + 0.8, 19, 2.7, '#c49b73', 14, 6).rotation.y = 0.2;
-        cylinder(meshes, px - 1.3, 4.9, pz + 1, 14, 0.4, '#d3b086', 13.5, 6).rotation.y = 0.2;
-        collision(props, id + '-mesa', px, pz, 11);
+        const rock:Part[]=[];
+        cylinder(rock, px, 1.1, pz, 24, 2.2, '#bb926e', 20, 6).rotation.y = 0.2;
+        cylinder(rock, px - 1.1, 3.4, pz + 0.8, 19, 2.7, '#c49b73', 14, 6).rotation.y = 0.2;
+        cylinder(rock, px - 1.3, 4.9, pz + 1, 14, 0.4, '#d3b086', 13.5, 6).rotation.y = 0.2;
+        collision(props, id + '-mesa', px, pz, 11,merge(rock,'mesa'),false,1800,{kind:'rock',height:5.2,mass:50000});
         for (let i = 0; i < 3; i++) {
           const rx=px+12+i*2,rz=pz-6+i*4;
           if(!clearSpace(rx,rz,2.5))continue;
-          cylinder(meshes,rx,.7,rz,4,1.8,'#b88c66',2.5,5);
-          collision(props,id+'-mesa-shelf-'+i,rx,rz,1.6);
+          const shelf:Part[]=[];cylinder(shelf,rx,.7,rz,4,1.8,'#b88c66',2.5,5);
+          collision(props,id+'-mesa-shelf-'+i,rx,rz,1.6,merge(shelf,'rock-shelf'),true,170,{kind:'rock-shelf',mass:1200});
         }
       }
       if (r() < 0.7) for (let i = 0; i < 3; i++) {
@@ -1010,6 +1092,11 @@ export function createWorld(scene: Scene, seed: number): World {
         cylinder(pieces, tx + 1.2, h * 0.7, tz, 0.4, h * 0.4, '#779776', 0.35, 5);
         collision(props, id + '-cactus-' + i, tx, tz, 0.65, merge(pieces, 'cactus'), true, 28);
       }
+      if(r()<.13&&clearSpace(x-15,z-13,5)) {
+        themedObject(props,id+'-desert-kiosk',x-15,z-13,'kiosk');
+        themedObject(props,id+'-desert-barrel',x-11,z-11,'barrel');
+        themedObject(props,id+'-desert-crates',x-19,z-10,'crates');
+      }
     }
     // Farm access lanes finish at real barns, rather than at a chunk boundary.
     const ni = Math.round(x / NS_GAP);
@@ -1020,28 +1107,31 @@ export function createWorld(scene: Scene, seed: number): World {
       const angle = Math.atan2(end.x - before.x, end.z - before.z);
       const bx = end.x + Math.cos(angle) * 12, bz = end.z - Math.sin(angle) * 12;
       if (!owned(bx, bz, cx, cz) || !clearSpace(bx, bz, 5)) continue;
-      box(meshes, bx, 2.4, bz, 10, 4.8, 9, biomeAt(bx,bz)==='desert' ? '#c7a181' : '#ba8065');
-      cylinder(meshes, bx, 5.1, bz, 13, 2, '#d3b191', 1, 4).rotation.y = Math.PI / 4;
-      box(meshes, bx, 1.6, bz - 4.55, 3.5, 3.2, 0.14, '#d8d4b7');
-      collision(props, 'farm-' + a.id, bx, bz, 5);
+      const barn:Part[]=[];
+      box(barn, bx, 2.4, bz, 10, 4.8, 9, biomeAt(bx,bz)==='desert' ? '#c7a181' : '#ba8065');
+      cylinder(barn, bx, 5.1, bz, 13, 2, '#d3b191', 1, 4).rotation.y = Math.PI / 4;
+      box(barn, bx, 1.6, bz - 4.55, 3.5, 3.2, 0.14, '#d8d4b7');
+      collision(props, 'farm-' + a.id, bx, bz, 5,merge(barn,'farm-barn'),true,400,{kind:'small-building',height:6.1,mass:3000,width:10,depth:9});
+      for(const side of[-1,1])themedObject(props,'farm-'+a.id+'-hay-'+side,bx+side*7,bz+2,'hay');
+      themedObject(props,'farm-'+a.id+'-gate',end.x,end.z,'gate',angle);
     }
     const mesh = merge(meshes, 'world-chunk-' + id);
     mesh.metadata = { worldChunk: true, biome, roadHierarchy: true, parkingLots: town ? parkingLots(town).filter(lot=>owned(lot.x,lot.z,cx,cz)).map(lot=>({id:lot.id,x:lot.x,z:lot.z,rotation:lot.rotation,width:lot.width,depth:lot.depth,entrance:lot.entrance,street:lot.street})) : [] };
     shadow?.addShadowCaster(mesh, false);
-    return { x: cx, z: cz, mesh, props };
+    return { x: cx, z: cz, mesh, props,visuals };
   }
 
   function dropChunk(chunk: Chunk): void {
     soilPatches.delete(chunk.x + ':' + chunk.z);
     shadow?.removeShadowCaster(chunk.mesh);
     chunk.mesh.dispose();
-    for (const prop of chunk.props) {
-      shadow?.removeShadowCaster(prop.mesh);
-      prop.mesh.dispose();
+    for (const prop of [...chunk.props,...chunk.visuals]) {
+      interactions.release(prop);
     }
   }
-  function update(x: number, z: number): void {
+  function update(x: number, z: number, dt = 1 / 60): void {
     if (disposed) return;
+    interactions.update(dt, x, z);
     ensureGarages(x, z);
     const cx = Math.round(x / CHUNK);
     const cz = Math.round(z / CHUNK);
@@ -1123,16 +1213,10 @@ export function createWorld(scene: Scene, seed: number): World {
     propsNear,
     trafficSpawns,
     setTrafficSide,
-    destroyProp(prop) {
-      if (!prop.breakable || !prop.active) return;
-      prop.active = false;
-      prop.hp = 0;
-      prop.mesh.setEnabled(false);
-      shadow?.removeShadowCaster(prop.mesh);
-      const id = propIds.get(prop);
-      if (id) destroyed.add(id);
-      if (destroyed.size > 6000) destroyed.delete(destroyed.values().next().value!);
-    },
+    updateOcclusion: interactions.updateOcclusion,
+    damageProp: interactions.damageProp,
+    setExplosionHandler: interactions.setExplosionHandler,
+    destroyProp: interactions.destroyProp,
     dispose() {
       disposed = true;
       for (const chunk of chunks.values()) dropChunk(chunk);
@@ -1143,6 +1227,7 @@ export function createWorld(scene: Scene, seed: number): World {
       phases.clear();
       parking.clear();
       soilPatches.clear();
+      interactions.dispose();
       material.dispose();
       lightMaterial.dispose();
     }

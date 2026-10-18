@@ -3,7 +3,7 @@ import type { CarSpec, VehicleVisual, GarageTab } from './types';
 import { createVehicle } from './vehicles';
 
 /** A self-contained, life-size workshop. No physics, controls or rotating car. */
-export function createGarage(engine: Engine, getCar: () => CarSpec, getColor: () => string): { scene: Scene; update(dt: number): void; refresh(): void; setView(tab: GarageTab): void; setCondition(healthRatio: number, tiresRatio: number): void; resize(): void; dispose(): void } {
+export function createGarage(engine: Engine, getCar: () => CarSpec, getColor: () => string, getTurret:()=>boolean=()=>false): { scene: Scene; update(dt: number): void; refresh(): void; setView(tab: GarageTab): void; setCondition(healthRatio: number, tiresRatio: number): void; resize(): void; dispose(): void } {
   const scene = new Scene(engine);
   scene.clearColor = Color4.FromHexString('#272318ff');
   scene.fogMode = Scene.FOGMODE_EXP2;
@@ -258,7 +258,7 @@ export function createGarage(engine: Engine, getCar: () => CarSpec, getColor: ()
     const spec = getCar();
     if (conditionCarId !== spec.id) { conditionCarId = spec.id; conditionHealth = conditionTires = 1; }
     car?.dispose(); car = createVehicle(scene, spec, getColor()); car.root.position.set(0, .03, 0); car.root.rotation.y = Math.PI + .12;
-    car.turret.rotation.y = -.16;
+    car.setTurretEnabled?.(getTurret());car.turret.rotation.y = -.16;
     setCondition(conditionHealth, conditionTires);
     const renderList = [...staticCasters, ...car.root.getChildMeshes()];
     if (shadows.getShadowMap()) shadows.getShadowMap()!.renderList = renderList;

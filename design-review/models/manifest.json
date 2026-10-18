@@ -1,0 +1,52 @@
+[
+  {
+    "id": "comet-mk2",
+    "title": "COMET MK2",
+    "file": "comet-mk2.gltf",
+    "triangles": 6916,
+    "meshes": 152,
+    "units": "metres",
+    "hasAnimation": false,
+    "defaultColor": "#fa661b"
+  },
+  {
+    "id": "dune-scout",
+    "title": "DUNE SCOUT",
+    "file": "dune-scout.gltf",
+    "triangles": 11860,
+    "meshes": 245,
+    "units": "metres",
+    "hasAnimation": false,
+    "defaultColor": "#859c4a"
+  },
+  {
+    "id": "brute-runner",
+    "title": "BRUTE RUNNER",
+    "file": "brute-runner.gltf",
+    "triangles": 10208,
+    "meshes": 206,
+    "units": "metres",
+    "hasAnimation": false,
+    "defaultColor": "#b54526"
+  },
+  {
+    "id": "interceptor",
+    "title": "INTERCEPTOR",
+    "file": "interceptor.gltf",
+    "triangles": 6956,
+    "meshes": 154,
+    "units": "metres",
+    "hasAnimation": false,
+    "defaultColor": "#e6e8d4"
+  },
+  {
+    "id": "wind-turbine",
+    "title": "ВЕТРОТУРБИНА",
+    "file": "wind-turbine.gltf",
+    "triangles": 320,
+    "meshes": 8,
+    "units": "metres",
+    "hasAnimation": true,
+    "defaultColor": "#e8e8d2"
+  }
+]

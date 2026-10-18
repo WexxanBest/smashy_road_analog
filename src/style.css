@@ -150,3 +150,64 @@ body:has(.dl-app[data-mode="playing"]) #game{cursor:none}
 
 .dl-weapon-keys{position:absolute;top:-22px;left:0;right:0;display:grid;grid-template-columns:1fr 1fr 45px;gap:10px;font:bold 13px Arial;color:#edf2df;text-align:center;text-shadow:0 1px 3px #14201a}.dl-combat-hud .dl-weapon-switch>button>svg{margin-top:0}.dl-combat-hud .dl-ammo{justify-content:center;padding-bottom:0}
 @media(max-width:800px){.dl-weapon-keys{grid-template-columns:1fr 1fr 37px;gap:8px;font-size:12px}}
+/* Equipment, persistent rewards and settings share the workshop's compact panels. */
+.dl-wallet-compact,.dl-garage-settings{display:none}
+.dl-app[data-mode="garage"] .dl-header-tools{gap:14px}
+.dl-app[data-mode="garage"] .dl-wallet-compact{display:flex;align-items:center;gap:7px;white-space:nowrap;padding:8px 11px;background:#111a13eb;border:1px solid #9caa7245;font-size:10px;color:#d8e0ca}
+.dl-wallet-compact b{font-size:18px;color:var(--acid);font-variant-numeric:tabular-nums}
+.dl-app[data-mode="garage"] .dl-garage-settings{display:grid;place-items:center;width:34px;height:34px;border:1px solid #9caa7245;background:#111a13eb;font-size:21px;color:#edf1df}
+.dl-app[data-mode="garage"] .dl-garage-left{pointer-events:auto;overscroll-behavior:contain}
+.dl-app[data-mode="garage"][data-garage-tab="cars"] .dl-garage-left>[data-panel="cars"]{display:block;margin-top:22px;padding-top:20px;border-top:1px solid #c2c5ad4d}
+.dl-app[data-mode="garage"][data-garage-tab="cars"] .dl-car-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;border-bottom:0}
+.dl-app[data-mode="garage"][data-garage-tab="cars"] .dl-car-tabs>button{justify-content:flex-start;padding:9px 7px;border:1px solid #bac49e35;font-size:11px}
+.dl-app[data-mode="garage"] .dl-car-tabs>button.is-active:after{display:none}
+.dl-car-info{flex-shrink:0}
+.dl-equipment{margin-top:25px;padding-top:20px;border-top:1px solid #c2c5ad4d}
+.dl-equipment h2,.dl-garage-challenges h2{font-family:'Arial Narrow',Arial,sans-serif;font-size:15px;letter-spacing:.5px;color:#edf1df;margin:0 0 13px}
+.dl-equipment p,.dl-garage-challenges>p{font-size:12px;line-height:1.5;color:#c5ceb6;margin:10px 0 14px}
+.dl-equipment>button{width:100%;padding:14px 12px;margin-top:8px;border:1px solid #bac49e70;background:#263326;color:#e6efb6;font-size:12px;font-weight:700;line-height:1.5;text-align:left}
+.dl-equipment>button:hover:not(:disabled){border-color:var(--acid);background:#35412a}
+.dl-equipment>button:disabled{opacity:.5}
+.dl-equipment>button[aria-pressed="true"]{border-color:#a5d28e;color:#bfe4a5}
+.dl-equipment-buy{background:var(--acid)!important;color:#172011!important}
+.dl-equipment-cooling{display:grid;grid-template-columns:1fr auto;gap:7px}
+.dl-equipment-cooling b{color:var(--acid)}
+.dl-equipment-cooling small{grid-column:1/-1;font-size:11px;font-weight:400;color:#d0dabd}
+.dl-app[data-mode="garage"] .dl-upgrade-main{min-width:0;flex:1}
+.dl-app[data-mode="garage"] .dl-upgrade{align-items:center}
+.dl-app[data-mode="garage"] .dl-upgrade-effect{display:block;font-size:11px;line-height:1.5;color:#e4e8ce;letter-spacing:0}
+.dl-app[data-mode="garage"] .dl-upgrade-description{display:none}
+.dl-challenges{display:grid;gap:12px;margin:15px 0}
+.dl-challenge{padding:14px 12px;border:1px solid #b7c89442;background:#142018a6}
+.dl-challenge>div{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:10px;color:#b7c9a0}
+.dl-challenge>div>b{color:var(--acid);font-size:12px;letter-spacing:.5px}
+.dl-challenge h3{font-size:13px;font-weight:700;color:#edf1df;margin:12px 0 7px}
+.dl-challenge p{font-size:12px;line-height:1.6;color:#d0d9c0;margin:0 0 11px}
+.dl-challenge progress{display:block;width:100%;height:6px;border:0;appearance:none;background:#abb88d2e;accent-color:var(--acid)}
+.dl-challenge progress::-webkit-progress-bar{background:#abb88d2e}
+.dl-challenge progress::-webkit-progress-value{background:var(--acid)}
+.dl-challenge progress::-moz-progress-bar{background:var(--acid)}
+.dl-challenge>small{display:block;margin-top:8px;font-size:10px;font-variant-numeric:tabular-nums;color:#cbd6bb}
+.dl-challenge.is-complete{border-color:#a4cc7b77}
+.dl-challenge.is-complete>small{color:#b8e59b}
+.dl-driving-controls input,.dl-driving-controls select,.dl-driving-controls summary,.dl-driving-controls label{pointer-events:auto}
+.dl-driving-controls details>label{display:block;margin:15px 0 7px}
+.dl-driving-controls input[type="range"]{display:block;width:100%;margin:9px 0 14px;accent-color:var(--acid);cursor:pointer}
+.dl-driving-controls .dl-volume-label{display:flex;justify-content:space-between;align-items:center}
+.dl-volume-label output{font-size:11px;font-variant-numeric:tabular-nums;color:var(--acid)}
+.dl-cheats{margin:14px 0 0;border:1px solid #b7c89442;padding:12px}
+.dl-cheats legend{font-size:11px;color:#c8d3b9;padding:0 5px}
+.dl-cheats:disabled{opacity:.4}
+.dl-driving-controls .dl-check{display:flex;align-items:center;gap:10px;font-size:12px;line-height:1.4;letter-spacing:0;margin:12px 0}
+.dl-check input{width:17px;height:17px;accent-color:var(--acid);flex-shrink:0}
+.dl-weapon-switch>button:disabled{opacity:.42}
+.dl-app[data-mode="garage"] .dl-modal{position:relative}
+.dl-app[data-mode="garage"] .dl-modal h2{font-size:33px;margin:0 0 25px}
+.dl-driving-panel{max-height:calc(100vh - 100px);overflow:auto;overscroll-behavior:contain}
+@media(max-width:1100px){.dl-app[data-mode="garage"] .dl-sound>span:last-child{display:none}.dl-app[data-mode="garage"] .dl-header-tools{gap:10px}.dl-app[data-mode="garage"] .dl-wallet-compact{padding:7px 9px;font-size:9px}.dl-wallet-compact b{font-size:17px}.dl-app[data-mode="garage"] .dl-sound{padding-left:0}}
+@media(max-width:650px){.dl-app[data-mode="garage"] .dl-header{left:15px;right:15px}.dl-app[data-mode="garage"] .dl-header-tools{gap:7px}.dl-app[data-mode="garage"] .dl-wallet-compact{padding:7px;font-size:8px;gap:5px}.dl-app[data-mode="garage"] .dl-wallet-compact b{font-size:15px}.dl-app[data-mode="garage"] .dl-brand{font-size:19px;gap:6px}.dl-app[data-mode="garage"] .dl-brand-symbol{width:29px;margin-right:-4px}.dl-app[data-mode="garage"] .dl-garage-settings{width:29px;height:30px;font-size:18px}.dl-app[data-mode="garage"] .dl-garage-left{width:min(295px,calc(100vw - 30px));right:auto}.dl-app[data-mode="garage"] .dl-swatches{grid-template-columns:repeat(4,minmax(0,1fr))}.dl-app[data-mode="garage"] .dl-upgrade-effect{font-size:10px}.dl-equipment p,.dl-challenge p{font-size:11px}}
+.dl-garage-settings-modal{display:block;width:min(470px,calc(100vw - 36px));padding:30px 26px}
+.dl-garage-settings-modal .dl-primary{margin-top:22px}
+.dl-garage-settings-modal .dl-test-kicker{margin-top:8px}
+.dl-app[data-sandbox="true"] .dl-hud .dl-pursuit-label{display:block!important;padding:6px 9px;border:1px solid #e1fa8c66;background:#19251de6;color:var(--acid);letter-spacing:1px}
+.dl-app[data-sandbox="true"][data-mode="garage"] .dl-wallet-compact::before{content:"ПЕСОЧНИЦА";color:var(--acid);font-size:8px;letter-spacing:.8px}

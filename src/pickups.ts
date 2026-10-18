@@ -6,7 +6,7 @@ export const PICKUP_INFO:Record<PickupKind,{name:string;label:string;color:strin
  repair:{name:'РЕМОНТ',label:'РЕМОНТ +25',color:'#ff786a',message:'Ремкомплект · кузов +25, мотор и шины +15'},
  ammo:{name:'ГРАНАТЫ',label:'ГРАНАТЫ +3',color:'#f2a563',message:'+3 гранаты · ПКМ'},
  nitro:{name:'НИТРО',label:'НИТРО +45',color:'#63cfff',message:'Нитро +45% · Shift'},
- rocket:{name:'РАКЕТЫ',label:'РАКЕТНИЦА +3',color:'#c6a0ff',message:'Ракетница · выбрана автоматически. Кликни по машине или вертолёту.'}
+ rocket:{name:'РАКЕТЫ',label:'РАКЕТНИЦА +3',color:'#c6a0ff',message:'Ракеты +3 · нажми 2 для выбора ракетницы.'}
 };
 interface Resources { model:StandardMaterial;labels:Map<PickupKind,StandardMaterial>; }
 const caches=new WeakMap<Scene,Resources>();

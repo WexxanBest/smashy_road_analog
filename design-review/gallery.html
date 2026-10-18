@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#202923" />
+  <title>DUSTLINE — варианты 3D моделей</title>
+  <link rel="stylesheet" href="./gallery.css" />
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#" aria-label="Галерея DUSTLINE"><span class="slashes">///</span> DUSTLINE <span class="review">ДИЗАЙН / 01</span></a>
+    <div class="intro"><p class="eyebrow">ВЫБОР ХАРАКТЕРА</p><h1>Три машины.<br>Три силуэта.</h1><p>Объемные концепты для следующей версии игры. Каждый можно покрутить и скачать.</p></div>
+    <button id="overview" class="overview active"><span>↗</span> Сравнить три варианта <span class="tiny">03</span></button>
+    <div id="model-list" class="model-list" aria-label="Выбор модели"></div>
+    <div class="extras-label">ДОПОЛНИТЕЛЬНО</div>
+    <div id="extra-list" class="extra-list"></div>
+    <div class="controls">
+      <div class="control-heading"><span>Цвет кузова</span><span id="color-name">Авторские цвета</span></div>
+      <div id="palette" class="palette">
+        <button data-color="#fa661b" style="--swatch:#fa661b" aria-label="Оранжевый" title="Оранжевый"></button>
+        <button data-color="#859c4a" style="--swatch:#859c4a" aria-label="Оливковый" title="Оливковый"></button>
+        <button data-color="#b54526" style="--swatch:#b54526" aria-label="Терракотовый" title="Терракотовый"></button>
+        <button data-color="#e6e8d4" style="--swatch:#e6e8d4" aria-label="Слоновая кость" title="Слоновая кость"></button>
+        <button data-color="#426e83" style="--swatch:#426e83" aria-label="Серо-синий" title="Серо-синий"></button>
+        <label class="custom-color" title="Свой цвет"><input id="custom-color" type="color" value="#fa661b" aria-label="Свой цвет кузова" /><span>+</span></label>
+      </div>
+      <label class="toggle-row"><span>Съемная турель <small id="turret-hint">Отдельный модуль</small></span><input id="turret-toggle" type="checkbox" /><i></i></label>
+      <label class="toggle-row"><span>Автоповорот <small>Остановится при касании</small></span><input id="rotate-toggle" type="checkbox" /><i></i></label>
+      <label class="toggle-row"><span>Контуры сетки <small>Проверка геометрии</small></span><input id="wire-toggle" type="checkbox" /><i></i></label>
+      <button id="reset" class="reset">↺ Вернуть ракурс и авторский цвет</button>
+    </div>
+    <div class="downloads"><button id="download" class="download">Скачать выбранную модель <span>glTF ↓</span></button><a class="module-download" href="./models/removable-turret.gltf" download>Скачать турель отдельно ↗</a><p>glTF 2.0 · буфер встроен · метры · Y вверх</p></div>
+    <p class="sidebar-note">Это отдельная галерея концептов. Модели еще не подключены к игровой физике, урону и управлению.</p>
+  </aside>
+  <main class="stage">
+    <div class="stage-header"><span class="status"><i></i> ЖИВАЯ 3D МОДЕЛЬ</span><span>ЛОУ-ПОЛИ / ИССЛЕДОВАНИЕ ФОРМЫ</span></div>
+    <canvas id="viewport" aria-label="Интерактивная трехмерная модель"></canvas>
+    <div id="loading">Подготовка моделей…</div>
+    <div id="labels" aria-hidden="true"></div>
+    <div class="view-tools"><button id="front-view" title="Вид спереди">Спереди</button><button id="side-view" title="Вид сбоку">Сбоку</button><button id="top-view" title="Вид сверху">Сверху</button></div>
+    <div class="stage-bottom"><div class="model-info"><p id="model-index" class="eyebrow">01 / 03 · ВЫБОР ИГРОКА</p><h2 id="model-title">Семейство DUSTLINE</h2><p id="model-description">Сравните пропорции: короткий хэтчбек, высокий внедорожник и длинный пикап.</p><div id="traits" class="traits"></div></div><div class="geometry-info"><strong id="triangle-count">—</strong><span>треугольников</span><small id="dimensions">Кузов / колеса / вооружение — отдельные узлы</small></div></div>
+    <div class="interaction-hint"><span>⟲ Мышь — вращение</span><span>↕ Колесико — масштаб</span><span>⇧ Shift + мышь — панорама</span><span id="animation-hint"></span></div>
+  </main>
+  <script type="module" src="./gallery.js"></script>
+</body>
+</html>
