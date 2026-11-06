@@ -1,9 +1,9 @@
-import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, HemisphericLight, SpotLight, PointLight, ShadowGenerator, Mesh, MeshBuilder, StandardMaterial, DynamicTexture, GlowLayer } from '@babylonjs/core';
+import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, HemisphericLight, SpotLight, PointLight, ShadowGenerator, Mesh, MeshBuilder, StandardMaterial, DynamicTexture, GlowLayer, TransformNode } from '@babylonjs/core';
 import type { CarSpec, VehicleVisual, GarageTab } from './types';
 import { createVehicle } from './vehicles';
 
 /** A self-contained, life-size workshop. No physics, controls or rotating car. */
-export function createGarage(engine: Engine, getCar: () => CarSpec, getColor: () => string, getTurret:()=>boolean=()=>false): { scene: Scene; update(dt: number): void; refresh(): void; setView(tab: GarageTab): void; setCondition(healthRatio: number, tiresRatio: number): void; resize(): void; dispose(): void } {
+export function createGarage(engine: Engine, getCar: () => CarSpec, getColor: () => string, getTurret:()=>boolean=()=>false): { scene: Scene; update(dt: number): void; refresh(): void; setQuality(quality:'quality'|'balanced'|'performance'):void; setView(tab: GarageTab): void; setCondition(healthRatio: number, tiresRatio: number): void; resize(): void; dispose(): void } {
   const scene = new Scene(engine);
   scene.clearColor = Color4.FromHexString('#272318ff');
   scene.fogMode = Scene.FOGMODE_EXP2;
@@ -35,19 +35,25 @@ export function createGarage(engine: Engine, getCar: () => CarSpec, getColor: ()
   cool.diffuse = Color3.FromHexString('#ffe7b5'); cool.intensity = 1.2; cool.range = 20;
   const back = new PointLight('workshop-sodium', new Vector3(-7.8, 3.8, 8.6), scene);
   back.diffuse = Color3.FromHexString('#fba64d'); back.intensity = 1.8; back.range = 17;
-  const shadows = new ShadowGenerator(1024, key);
-  shadows.useBlurExponentialShadowMap = true; shadows.blurKernel = 14;
+  const shadows = new ShadowGenerator(768, key);
+  shadows.blurKernel = 14;
   shadows.bias = .0005; shadows.normalBias = .025; shadows.setDarkness(.38);
   const glow = new GlowLayer('workshop-fixtures', scene, { mainTextureFixedSize: 512, blurKernelSize: 22 });
-  glow.intensity = .3;
+  glow.intensity = .3;glow.isEnabled=false;
+  let quality:'quality'|'balanced'|'performance'='balanced';
+  let qualityApplied=false;
+  const workshopMaterials=new Set<StandardMaterial>();
   const batches = new Map<StandardMaterial, Mesh[]>();
+  const surfaceBatches = new Map<StandardMaterial, Mesh[]>();
+  const glowingMeshes=new Set<Mesh>();
+  const includeGlow=(mesh:Mesh)=>{glowingMeshes.add(mesh);glow.addIncludedOnlyMesh(mesh);};
   const staticCasters: Mesh[] = [];
   let randomState = 7319;
   const random = () => { randomState = (Math.imul(randomState, 1664525) + 1013904223) | 0; return (randomState >>> 0) / 4294967296; };
   const mat = (name: string, hex: string, emissive = 0) => {
     const m = new StandardMaterial(`workshop-${name}`, scene);
     m.diffuseColor = Color3.FromHexString(hex); m.specularColor = new Color3(.06, .065, .06);
-    m.specularPower = 32; m.maxSimultaneousLights = 4;
+    m.specularPower = 32; m.maxSimultaneousLights = 2;workshopMaterials.add(m);
     if (emissive) m.emissiveColor = m.diffuseColor.scale(emissive);
     return m;
   };
@@ -91,6 +97,7 @@ export function createGarage(engine: Engine, getCar: () => CarSpec, getColor: ()
   function register(mesh: Mesh, material: StandardMaterial, cast = true, batch = true) {
     mesh.material = material; mesh.isPickable = false; mesh.receiveShadows = true;
     if (batch) { const group = batches.get(material) || []; group.push(mesh); batches.set(material, group); }
+    else if(!cast){const group=surfaceBatches.get(material)||[];group.push(mesh);surfaceBatches.set(material,group);}
     if (cast && !batch) staticCasters.push(mesh);
     return mesh;
   }
@@ -117,10 +124,10 @@ export function createGarage(engine: Engine, getCar: () => CarSpec, getColor: ()
   for (const x of [-7, 0, 7]) box('roof-long-beam', x, 6.1, 0, .17, .28, 24, steel);
   for (const z of [-4.4, 2.2, 8.4]) for (const x of [-4.8, 4.8]) {
     box('light-fixture', x, 5.68, z, 2.5, .12, .4, darkSteel);
-    for (const dz of [-.1, .1]) { const light = box('fluorescent-tube', x, 5.59, z + dz, 2.24, .055, .075, white, false); glow.addIncludedOnlyMesh(light); }
+    for (const dz of [-.1, .1]) { const light = box('fluorescent-tube', x, 5.59, z + dz, 2.24, .055, .075, white, false); includeGlow(light); }
     tube('light-suspension', [new Vector3(x - .8, 6.2, z), new Vector3(x - .8, 5.7, z)], .018, black);
   }
-  for (const [x, z] of [[-1.8, -5.3], [6.5, 3.6]]) { cylinder('pendant-stem', x, 5.85, z, .06, 1.0, black); const shade = cylinder('pendant-shade', x, 5.25, z, .9, .5, darkSteel); const lamp = box('pendant-bulb', x, 4.99, z, .65, .03, .65, sodium, false); glow.addIncludedOnlyMesh(lamp); shade.receiveShadows = false; }
+  for (const [x, z] of [[-1.8, -5.3], [6.5, 3.6]]) { cylinder('pendant-stem', x, 5.85, z, .06, 1.0, black); const shade = cylinder('pendant-shade', x, 5.25, z, .9, .5, darkSteel); const lamp = box('pendant-bulb', x, 4.99, z, .65, .03, .65, sodium, false); includeGlow(lamp); shade.receiveShadows = false; }
   // A real rolling shutter and side access door anchor the enclosed room.
   box('shutter-recess', 3.1, 2.6, 11.35, 7.7, 5.3, .22, black);
   box('shutter-sheet', 3.1, 2.5, 11.15, 7.2, 5, .12, steel);
@@ -141,7 +148,7 @@ export function createGarage(engine: Engine, getCar: () => CarSpec, getColor: ()
     for (let i = 0; i < 6; i++) { const stripe = box('lift-caution-stripe', side * 4, .48 + i * .16, 1.84, .43, .075, .012, black); stripe.rotation.z = .18; }
   }
   box('parking-stop-line', 0, .008, -3.8, 4.65, .012, .06, yellow, false);
-  for (const side of [-1, 1]) { const line = box('illuminated-bay-side', side * 3.05, .025, -.1, .065, .025, 6.6, bayLight, false); glow.addIncludedOnlyMesh(line); const edge = box('illuminated-bay-end', 0, .025, side * 3.3 - .1, 6.15, .025, .065, bayLight, false); glow.addIncludedOnlyMesh(edge); }
+  for (const side of [-1, 1]) { const line = box('illuminated-bay-side', side * 3.05, .025, -.1, .065, .025, 6.6, bayLight, false); includeGlow(line); const edge = box('illuminated-bay-end', 0, .025, side * 3.3 - .1, 6.15, .025, .065, bayLight, false); includeGlow(edge); }
   for (let i = 0; i < 11; i++) { const mark = box('bay-caution-tile', -2.7 + i * .54, .019, -3.57, .22, .016, .46, tape, false); mark.rotation.y = -.3; }
   box('floor-drain', 5.2, .012, -.5, .62, .02, 6.6, darkSteel, false);
   for (let i = 0; i < 31; i++) box('drain-grate', 5.2, .028, -3.7 + i * .21, .56, .018, .035, silver, false);
@@ -230,12 +237,21 @@ export function createGarage(engine: Engine, getCar: () => CarSpec, getColor: ()
   });
   poster.diffuseTexture = signTexture;
   const sign = MeshBuilder.CreatePlane('workshop-sign', { width: 3.4, height: 1.27 }, scene); sign.position.set(2.9, 5.55, 10.91); register(sign, poster, false, false);
-  const amberFixture = box('sodium-wall-light', -8.5, 4, 11.05, .55, .22, .17, sodium, false); glow.addIncludedOnlyMesh(amberFixture);
+  const amberFixture = box('sodium-wall-light', -8.5, 4, 11.05, .55, .22, .17, sodium, false); includeGlow(amberFixture);
   // Geometry is batched by material once; the hero vehicle remains independent.
   for (const [material, meshes] of batches) {
     const merged = Mesh.MergeMeshes(meshes, true, true);
     if (merged) { merged.name = `workshop-static-${material.name}`; merged.isPickable = false; merged.receiveShadows = true; merged.freezeWorldMatrix(); staticCasters.push(merged); }
   }
+  // Floor grates/markings and lamps used to be dozens of separate draws despite
+  // being static. Keep non-casters in their own material batches.
+  for(const [material,meshes]of surfaceBatches){
+    if(meshes.length<2)continue;
+    const emits=meshes.some(mesh=>glowingMeshes.has(mesh));
+    for(const mesh of meshes)if(glowingMeshes.has(mesh)){glow.removeIncludedOnlyMesh(mesh);glowingMeshes.delete(mesh);}
+    const merged=Mesh.MergeMeshes(meshes,true,true);if(merged){merged.name='workshop-surface-'+material.name;merged.isPickable=false;merged.receiveShadows=true;merged.freezeWorldMatrix();if(emits)includeGlow(merged);}
+  }
+  batches.clear();surfaceBatches.clear();glowingMeshes.clear();
   for (const mesh of scene.meshes) { mesh.isPickable = false; if (!mesh.name.startsWith('vehicle')) mesh.freezeWorldMatrix(); }
   // Soft contact beneath the wheels complements the directional shadow map.
   const contactMat = mat('contact-shadow', '#050b08');
@@ -245,29 +261,59 @@ export function createGarage(engine: Engine, getCar: () => CarSpec, getColor: ()
   contactMat.diffuseTexture.hasAlpha = true; contactMat.useAlphaFromDiffuseTexture = true; contactMat.disableLighting = true;
   const contact = MeshBuilder.CreateGround('hero-contact-shadow', { width: 3.5, height: 5.3 }, scene); contact.position.y = .012; contact.material = contactMat; contact.isPickable = false;
   let car: VehicleVisual;
-  let conditionHealth = 1, conditionTires = 1, conditionCarId = '';
+  let conditionHealth = 1, conditionTires = 1, conditionCarId = '',conditionApplied=false;
+  function previewTransforms(frozen:boolean){
+    if(!car)return;
+    for(const node of [car.root,...car.root.getDescendants()])if(node instanceof TransformNode){if(frozen)node.freezeWorldMatrix();else node.unfreezeWorldMatrix();}
+  }
+  function refreshShadow(){
+    const map=shadows.getShadowMap();if(!map)return;
+    map.renderList=[...staticCasters,...(car?.root.getChildMeshes()??[])];
+    // The preview car and workshop stay still. Camera motion does not change a
+    // spotlight's projection, so balanced mode reuses this map until an edit.
+    map.refreshRate=quality==='quality'?1:0;map.resetRefreshCounter();
+  }
+  function setQuality(next:'quality'|'balanced'|'performance'){
+    if(qualityApplied&&quality===next)return;qualityApplied=true;
+    quality=next;const detailed=next==='quality';
+    glow.isEnabled=detailed;cool.setEnabled(detailed);back.setEnabled(detailed);
+    ambient.intensity=detailed?.61:next==='performance'?.92:.82;
+    scene.shadowsEnabled=next!=='performance';
+    shadows.useBlurExponentialShadowMap=detailed;shadows.mapSize=detailed?1024:768;
+    scene.imageProcessingConfiguration.vignetteEnabled=next!=='performance';
+    for(const material of scene.materials)if(material instanceof StandardMaterial){material.unfreeze();material.maxSimultaneousLights=detailed?4:2;}
+    refreshShadow();
+    // Only immutable room materials are frozen; vehicle paints/damage retain
+    // their normal material update path.
+    for(const material of workshopMaterials)material.freeze();
+  }
   function setCondition(healthRatio: number, tiresRatio: number) {
-    conditionHealth = Math.max(0, Math.min(1, healthRatio));
-    conditionTires = Math.max(0, Math.min(1, tiresRatio));
+    const health=Math.max(0,Math.min(1,healthRatio)),tires=Math.max(0,Math.min(1,tiresRatio));
+    if(conditionApplied&&conditionHealth===health&&conditionTires===tires)return;
+    conditionHealth = health;conditionTires = tires;conditionApplied=true;
+    previewTransforms(false);
     car?.setDamage(conditionHealth, conditionTires);
     // Vehicle debris owns cloned materials and releases them in its dispose observer.
     // The workshop keeps the detached-panel appearance without loose flying parts.
     for (const debris of car?.popDebris?.() || []) debris.dispose(false, false);
+    previewTransforms(true);refreshShadow();
   }
   function refresh() {
     const spec = getCar();
     if (conditionCarId !== spec.id) { conditionCarId = spec.id; conditionHealth = conditionTires = 1; }
-    car?.dispose(); car = createVehicle(scene, spec, getColor()); car.root.position.set(0, .03, 0); car.root.rotation.y = Math.PI + .12;
+    car?.dispose(); car = createVehicle(scene, spec, getColor()); conditionApplied=false;car.root.position.set(0, .03, 0); car.root.rotation.y = Math.PI + .12;
     car.setTurretEnabled?.(getTurret());car.turret.rotation.y = -.16;
+    for(const mesh of car.root.getChildMeshes())if(mesh.material instanceof StandardMaterial)mesh.material.maxSimultaneousLights=quality==='quality'?4:2;
     setCondition(conditionHealth, conditionTires);
-    const renderList = [...staticCasters, ...car.root.getChildMeshes()];
-    if (shadows.getShadowMap()) shadows.getShadowMap()!.renderList = renderList;
   }
   function applyView() {
     const radius = Math.min(11.1, Math.max(7.8, view.radius));
+    const canvas = engine.getRenderingCanvas();
+    const portraitCatalog = activeTab === 'cars' && !!canvas && canvas.clientWidth <= 650 && canvas.clientHeight >= 700 && aspect < 1;
     camera.position.set(Math.sin(view.angle) * radius, Math.max(2.5, Math.min(4.8, view.height)), Math.cos(view.angle) * radius);
-    target.set(Math.cos(view.angle) * view.offset, view.targetY, -Math.sin(view.angle) * view.offset);
-    camera.setTarget(target); camera.fov = view.fov * (aspect < 1.25 ? 1.34 : aspect < 1.6 ? 1.1 : 1);
+    const offset = portraitCatalog ? 0 : view.offset;
+    target.set(Math.cos(view.angle) * offset, view.targetY, -Math.sin(view.angle) * offset);
+    camera.setTarget(target); camera.fov = view.fov * (portraitCatalog ? 2 : aspect < 1.25 ? 1.34 : aspect < 1.6 ? 1.1 : 1);
   }
   function setView(tab: GarageTab) {
     const next = views[tab]; if (!next) return;
@@ -277,16 +323,17 @@ export function createGarage(engine: Engine, getCar: () => CarSpec, getColor: ()
     viewFrom = { ...view }; viewTo = { ...next, angle: view.angle + delta }; transition = 0;
   }
   function resize() { aspect = engine.getRenderWidth() / Math.max(1, engine.getRenderHeight()); applyView(); }
-  refresh(); resize();
+  refresh(); setQuality('balanced');resize();contact.freezeWorldMatrix();
   // Diagnostics return copies, so tests cannot move the real camera or preview car.
   scene.metadata = {};
   Object.defineProperty(scene.metadata, 'garageView', { enumerable: true, get: () => ({
     tab: activeTab, transition, view: { ...view }, destination: { ...viewTo },
     cameraPosition: camera.position.asArray(), cameraTarget: target.asArray(), fov: camera.fov,
-    carId: conditionCarId, carPosition: car.root.position.asArray(), carRotation: car.root.rotation.asArray()
+    carId: conditionCarId, carPosition: car.root.position.asArray(), carRotation: car.root.rotation.asArray(),quality,
+    shadowMapSize:shadows.mapSize,shadowRefreshRate:shadows.getShadowMap()?.refreshRate,glowEnabled:glow.isEnabled
   }) });
   return {
-    scene, refresh, setView, setCondition, resize,
+    scene, refresh, setView, setCondition, resize,setQuality,
     update(dt: number) { if (transition >= 1) return; transition = Math.min(1, transition + Math.min(.1, Math.max(0, dt)) / .95); const ease = 1 - (1 - transition) ** 3; for (const key of Object.keys(view) as (keyof typeof view)[]) view[key] = viewFrom[key] + (viewTo[key] - viewFrom[key]) * ease; applyView(); },
     dispose() { car?.dispose(); scene.dispose(); }
   };

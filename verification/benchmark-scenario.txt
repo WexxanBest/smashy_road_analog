@@ -1,0 +1,8 @@
+
+if(IS_QA)void import('./perf-probe').then(({installPerfProbe})=>installPerfProbe(engine,scene,()=>{
+ startRun();qaFreeDrive=true;state.sandbox=true;state.cheats.invincible=true;state.wanted=5;startGrace=0;state.tutorialTime=0;state.pursuitEnabled=true;
+ const roles=['patrol','interceptor','suv','swat'] as const;
+ for(let i=0;i<8;i++){const a=createActor(policeSpec(roles[i%4],0),-12+(i%4)*8,27+Math.floor(i/4)*10,Math.PI,'police','#e3e4de');a.roadblock=true;police.push(a);}
+ for(let i=0;i<12;i++){const c=CIVILIAN_FLEET[i],a=createActor(c,-26+(i%4)*16,-15-Math.floor(i/4)*10,0,'traffic',c.color);a.disabled=true;traffic.push(a);}
+ spawnHeli(true);spawnHeli(true);
+},()=>{state.mode='paused';},()=>({seed:state.seed,scenario:'fixed-city-8-police-12-traffic-2-helicopters',police:police.length,traffic:traffic.length,helicopters:helis.length,parked:parked.size,meshes:scene.meshes.length,shadowCasters:shadows.getShadowMap()?.renderList?.length,hardwareScale:engine.getHardwareScalingLevel(),quality:(state as GameState&{graphicsQuality?:string}).graphicsQuality??'original',seconds:state.seconds}),()=>{state.mode='playing';}));

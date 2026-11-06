@@ -10,10 +10,20 @@ export const PURSUIT_LEVELS=[
  {cars:6,interval:4,helis:1,heliCooldown:50},
  {cars:8,interval:3.5,helis:2,heliCooldown:40}
 ] as const;
-export function policeSpec(role:NonNullable<CarSpec['policeRole']>):CarSpec {
+export function policeSpec(role:NonNullable<CarSpec['policeRole']>, variantIndex=0):CarSpec {
  const source=CARS[role==='suv'?1:role==='swat'?6:role==='interceptor'?3:0];
  const values={patrol:{speed:29,armor:120,mass:1150,handling:1.1},interceptor:{speed:37,armor:100,mass:1050,handling:1.25},suv:{speed:30,armor:175,mass:1800,handling:1},swat:{speed:25,armor:260,mass:2500,handling:.85}}[role];
- return {...source,...values,id:'police-'+role,name:role.toUpperCase(),policeRole:role,bodyStyle:role==='swat'?'van':role==='suv'?'suv':role==='interceptor'?'coupe':'hatch'};
+ const spec:CarSpec={...source,...values,id:'police-'+role,name:role.toUpperCase(),subtitle:{patrol:'Городской патруль',interceptor:'Скоростной перехватчик',suv:'Полицейский внедорожник',swat:'Бронированный фургон спецназа'}[role],policeRole:role,bodyStyle:role==='swat'?'van':role==='suv'?'suv':role==='interceptor'?'muscle':'hatch',visualVariant:role==='patrol'?'sedan':undefined};
+ // Fleet variety keeps the four existing pursuit roles and their spawn limits.
+ const index=Math.abs(Math.floor(Number.isFinite(variantIndex)?variantIndex:0));
+ if(role==='patrol')Object.assign(spec,{width:2.04,length:4.3});
+ if(role==='interceptor')Object.assign(spec,{width:2.12,length:4.5});
+ if(role==='patrol'&&index%2===1)Object.assign(spec,{id:'police-rally',name:'RALLY PATROL',subtitle:'Раллийный патруль',visualVariant:'rally-hatch',width:2.08,length:3.85});
+ if(role==='patrol'&&index%3===2)Object.assign(spec,{id:'police-motorcycle',name:'ROAD RIDER',subtitle:'Дорожный полицейский мотоцикл',visualVariant:'motorcycle',width:.92,length:2.7,armor:70,mass:350,speed:34,handling:1.25});
+ if(role==='suv'&&index%2===1)Object.assign(spec,{id:'police-sheriff',name:'SHERIFF',subtitle:'Пикап шерифа',bodyStyle:'pickup',visualVariant:'sheriff',width:2.2,length:4.6});
+ if(role==='swat'&&index%3===1)Object.assign(spec,{id:'police-command',name:'COMMAND',subtitle:'Мобильный полицейский штаб',visualVariant:'command',width:2.3,length:5.5});
+ if(role==='swat'&&index%3===2)Object.assign(spec,{id:'police-apc',name:'ARMORED RESPONSE',subtitle:'Бронетранспортёр 8×8',visualVariant:'apc',extraAxles:2,width:2.45,length:5.6});
+ return spec;
 }
 export function choosePoliceRole(stars:number,index:number):NonNullable<CarSpec['policeRole']> {
  if(stars>=4&&index%4===3)return 'swat';

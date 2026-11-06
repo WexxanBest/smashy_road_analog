@@ -4,17 +4,19 @@ export interface MapPoint { x:number; z:number; }
 export function createNavigation(cellSize=20, revealRadius=95) {
   const explored=new Set<string>();
   let destination:MapPoint|undefined;
+  let lastX=Infinity,lastZ=Infinity,lastRadius=0;
   const key=(x:number,z:number)=>`${Math.floor(x/cellSize)},${Math.floor(z/cellSize)}`;
   return {
     cellSize, explored,
     get waypoint(){return destination;},
     isExplored(x:number,z:number){return explored.has(key(x,z));},
-    discover(x:number,z:number){
+    discover(x:number,z:number,range=revealRadius){
       if(!Number.isFinite(x)||!Number.isFinite(z))return;
-      const radius=revealRadius+cellSize*.7;
-      for(let iz=Math.floor((z-revealRadius)/cellSize);iz<=Math.floor((z+revealRadius)/cellSize);iz++)
-        for(let ix=Math.floor((x-revealRadius)/cellSize);ix<=Math.floor((x+revealRadius)/cellSize);ix++)
-          if(Math.hypot((ix+.5)*cellSize-x,(iz+.5)*cellSize-z)<radius)explored.add(`${ix},${iz}`);
+      if((x-lastX)**2+(z-lastZ)**2<4&&range<=lastRadius)return;
+      lastX=x;lastZ=z;lastRadius=range;const radius=range+cellSize*.7;
+      for(let iz=Math.floor((z-range)/cellSize);iz<=Math.floor((z+range)/cellSize);iz++)
+        for(let ix=Math.floor((x-range)/cellSize);ix<=Math.floor((x+range)/cellSize);ix++)
+          if(((ix+.5)*cellSize-x)**2+((iz+.5)*cellSize-z)**2<radius*radius)explored.add(`${ix},${iz}`);
     },
     setWaypoint(point:MapPoint|undefined){destination=point&&Number.isFinite(point.x)&&Number.isFinite(point.z)?{...point}:undefined;},
     distance(x:number,z:number){return destination?Math.hypot(destination.x-x,destination.z-z):Infinity;},

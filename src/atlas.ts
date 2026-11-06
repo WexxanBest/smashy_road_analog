@@ -1,4 +1,5 @@
 import type { MapData, RadarMarker } from './types';
+import { BIOME_COLORS } from './types';
 import type { MapPoint, Navigation } from './navigation';
 import './map.css';
 
@@ -16,13 +17,14 @@ export function createAtlas(container:HTMLElement,map:MapData,nav:Navigation,onC
   let x=0,z=0,angle=0,centerX=0,centerZ=0,range=240,w=800,h=600,dpr=1,lastDraw=0;
   let markers:RadarMarker[]=[],drag:{x:number;y:number;cx:number;cz:number;moved:boolean}|undefined;
   let previousFocus:HTMLElement|null=null;
+  let miniSizeDirty=true,miniVisible=false,miniWidth=0,miniHeight=0,miniRatio=1,radarRange=100;
   // Each discovered cell is sampled once; exploration survives chunk unloading.
   const tiles=new Map<string,string[]>();
-  const terrain={city:'#38423b',desert:'#746447',fields:'#41553e'};
+  const terrain=BIOME_COLORS;
   function project(p:MapPoint){const scale=h/(range*2);return {x:w/2+(p.x-centerX)*scale,y:h/2-(p.z-centerZ)*scale};}
   function unproject(px:number,py:number){const scale=h/(range*2);return {x:centerX+(px-w/2)/scale,z:centerZ-(py-h/2)/scale};}
   function diamond(px:number,py:number,r:number,color:string){ctx.fillStyle=color;ctx.beginPath();ctx.moveTo(px,py-r);ctx.lineTo(px+r,py);ctx.lineTo(px,py+r);ctx.lineTo(px-r,py);ctx.closePath();ctx.fill();}
-  function resize(){const rect=canvas.getBoundingClientRect();w=Math.max(1,rect.width);h=Math.max(1,rect.height);dpr=Math.min(2,window.devicePixelRatio||1);canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);draw();}
+  function resize(){miniSizeDirty=true;if(root.hidden)return;const rect=canvas.getBoundingClientRect();w=Math.max(1,rect.width);h=Math.max(1,rect.height);dpr=Math.min(2,window.devicePixelRatio||1);canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);draw();}
   function draw(){if(root.hidden)return;ctx.setTransform(dpr,0,0,dpr,0,0);ctx.fillStyle='#131b19';ctx.fillRect(0,0,w,h);
     const scale=h/(range*2),step=nav.cellSize/4;
     const min=unproject(0,h),max=unproject(w,0);
@@ -41,9 +43,14 @@ export function createAtlas(container:HTMLElement,map:MapData,nav:Navigation,onC
     ctx.fillStyle='#b7c9b4';ctx.font='12px Arial';ctx.textAlign='left';ctx.fillText(`N ↑   /   ${Math.round(range*2)} м`,18,26);
     distance.textContent=nav.waypoint?`ДО ТОЧКИ ${Math.round(nav.distance(x,z))} М`:'ВЫБЕРИ ТОЧКУ НАЗНАЧЕНИЯ';clear.disabled=!nav.waypoint;
   }
-  function drawMini(){const width=miniBase.clientWidth,height=miniBase.clientHeight;mini.style.width=`${width}px`;mini.style.height=`${height}px`;const ratio=Math.min(2,window.devicePixelRatio||1);if(mini.width!==Math.round(width*ratio)||mini.height!==Math.round(height*ratio)){mini.width=Math.round(width*ratio);mini.height=Math.round(height*ratio);}miniCtx.setTransform(ratio,0,0,ratio,0,0);miniCtx.clearRect(0,0,width,height);
-    bearing.hidden=!nav.waypoint;if(!nav.waypoint)return;bearing.textContent=`◆ ${Math.round(nav.distance(x,z))} м`;
-    const dx=(nav.waypoint.x-x)*width/200,dy=-(nav.waypoint.z-z)*height/200,clamp=Math.min(1,(width/2-12)/Math.max(.01,Math.abs(dx)),(height/2-12)/Math.max(.01,Math.abs(dy))),px=width/2+dx*clamp,py=height/2+dy*clamp;
+  function drawMini(){
+    // Most frames have no waypoint; avoid forcing layout after the HUD updates.
+    if(!nav.waypoint){if(miniVisible){mini.hidden=true;bearing.hidden=true;miniVisible=false;}return;}
+    if(!miniVisible){mini.hidden=false;bearing.hidden=false;miniVisible=true;miniSizeDirty=true;}
+    if(miniSizeDirty){miniWidth=miniBase.clientWidth;miniHeight=miniBase.clientHeight;miniRatio=Math.min(2,window.devicePixelRatio||1);mini.style.width=`${miniWidth}px`;mini.style.height=`${miniHeight}px`;mini.width=Math.round(miniWidth*miniRatio);mini.height=Math.round(miniHeight*miniRatio);miniSizeDirty=false;}
+    const width=miniWidth,height=miniHeight;miniCtx.setTransform(miniRatio,0,0,miniRatio,0,0);miniCtx.clearRect(0,0,width,height);
+    const label=`◆ ${Math.round(nav.distance(x,z))} м`;if(bearing.textContent!==label)bearing.textContent=label;
+    const dx=(nav.waypoint.x-x)*width/(radarRange*2),dy=-(nav.waypoint.z-z)*height/(radarRange*2),clamp=Math.min(1,(width/2-12)/Math.max(.01,Math.abs(dx)),(height/2-12)/Math.max(.01,Math.abs(dy))),px=width/2+dx*clamp,py=height/2+dy*clamp;
     miniCtx.strokeStyle='#64d9ed';miniCtx.lineWidth=2;miniCtx.setLineDash([4,5]);miniCtx.beginPath();const length=Math.max(1,Math.hypot(dx,dy));miniCtx.moveTo(width/2+dx/length*12,height/2+dy/length*12);miniCtx.lineTo(px,py);miniCtx.stroke();miniCtx.setLineDash([]);
     miniCtx.save();miniCtx.translate(px,py);if(clamp<1){miniCtx.rotate(Math.atan2(dy,dx));miniCtx.fillStyle='#64d9ed';miniCtx.beginPath();miniCtx.moveTo(8,0);miniCtx.lineTo(-5,-6);miniCtx.lineTo(-2,0);miniCtx.lineTo(-5,6);miniCtx.closePath();miniCtx.fill();}else{miniCtx.fillStyle='#64d9ed';miniCtx.fillRect(-5,-5,10,10);}miniCtx.restore();
   }
@@ -56,5 +63,6 @@ export function createAtlas(container:HTMLElement,map:MapData,nav:Navigation,onC
   canvas.addEventListener('pointercancel',()=>drag=undefined);
   canvas.addEventListener('wheel',event=>{event.preventDefault();range=Math.max(80,Math.min(3200,range*Math.exp(event.deltaY*.001)));draw();},{passive:false});
   window.addEventListener('resize',resize);
-  return {get isOpen(){return !root.hidden;},open,close,toggle(){root.hidden?open():close();},update(px:number,pz:number,a:number,list:RadarMarker[]){x=px;z=pz;angle=a;markers=list;drawMini();if(!root.hidden&&performance.now()-lastDraw>200){draw();lastDraw=performance.now();}},dispose(){close();window.removeEventListener('resize',resize);root.remove();mini.remove();bearing.remove();tiles.clear();}};
+  mini.hidden=true;
+  return {get isOpen(){return !root.hidden;},open,close,toggle(){root.hidden?open():close();},update(px:number,pz:number,a:number,list:RadarMarker[],viewRange=100){x=px;z=pz;angle=a;markers=list;radarRange=Number.isFinite(viewRange)?Math.max(50,Math.min(250,viewRange)):100;drawMini();if(!root.hidden&&performance.now()-lastDraw>200){draw();lastDraw=performance.now();}},dispose(){close();window.removeEventListener('resize',resize);root.remove();mini.remove();bearing.remove();tiles.clear();}};
 }

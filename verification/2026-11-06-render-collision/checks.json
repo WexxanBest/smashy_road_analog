@@ -1,0 +1,17 @@
+{
+  "date": "2026-11-06",
+  "tests": {"passed": 59, "failed": 0, "command": "npm test"},
+  "build": "passed",
+  "regressions": [
+    "Moving shadow texture matches the light matrix on every rendered frame",
+    "Invisible moving colliders and moved props use current bounds",
+    "Solid containers have collision proxies",
+    "Scenery barriers block contact while service bays and bridge crossings stay open"
+  ],
+  "browser": {
+    "seed": 42,
+    "isolatedSave": "render-collision-20261106",
+    "breakableContact": {"kind": "hydrant", "hpBefore": 35, "hpAfter": 0, "activeAfter": false},
+    "wallAndContainerContact": "collision-checks.json"
+  }
+}

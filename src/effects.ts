@@ -1,148 +1,271 @@
-import { Color3, Mesh, MeshBuilder, Scene, StandardMaterial, TransformNode, Vector3, VertexBuffer, VertexData, Matrix } from '@babylonjs/core';
+import { Color3, Mesh, MeshBuilder, Scene, StandardMaterial, TransformNode, Vector3, VertexBuffer, VertexData, Matrix, Quaternion } from '@babylonjs/core';
 import { conceptBox } from './vehicle-concepts';
 
+export type ExplosionKind = 'car' | 'helicopter' | 'impact';
+type ParticleKind = 'spark' | 'smoke' | 'tracer' | 'flash' | 'fire' | 'dust' | 'ember';
+type ParticleShape = 'shard' | 'glow' | 'smoke' | 'ring';
 interface Particle {
-  mesh: Mesh;
+  position: Vector3;
   velocity: Vector3;
+  rotation: Vector3;
+  scale: Vector3;
+  color: Color3;
   life: number;
   duration: number;
-  kind: 'spark' | 'smoke' | 'tracer';
+  kind: ParticleKind;
+  shape: ParticleShape;
   size: number;
+  stretch: number;
 }
+interface ExplosionSequence {
+  position: Vector3;
+  life: number;
+  age: number;
+  size: number;
+  smokeStarted: boolean;
+  emberClock: number;
+}
+const PARTICLE_CAPACITY = 240;
+const EXPLOSION_CAPACITY = 8;
 
-export function createEffects(scene: Scene): {
-  burst(position: Vector3, color: string, count?: number, power?: number): void;
-  smoke(position: Vector3, dark?: boolean): void;
-  tracer(from: Vector3, to: Vector3): void;
-  update(dt: number): void;
-  dispose(): void;
-} {
-  const materialCache = new Map<string, StandardMaterial>();
-  function material(hex: string, smoke = false): StandardMaterial {
-    const key = smoke ? 'smoke-' + hex : hex;
-    let mat = materialCache.get(key);
-    if (mat) return mat;
-    mat = new StandardMaterial(`effect-${key}`, scene);
-    mat.diffuseColor = Color3.FromHexString(hex);
-    mat.specularColor = Color3.Black();
-    if (smoke) {
-      mat.emissiveColor = mat.diffuseColor.scale(0.08);
-      mat.alpha = 0.57;
-    } else {
-      mat.disableLighting = true;
-      mat.emissiveColor = mat.diffuseColor.clone();
+/** Four shared geometry/material batches, regardless of how many explosions are
+ * active. Tiny shards are visual particles; only the caller's large pieces use
+ * Havok. Emission creates no new meshes, materials, lights or physics bodies. */
+export function createEffects(scene: Scene) {
+  const palettes = new Map<string, Color3>();
+  function color(hex: string): Color3 {
+    let tint = palettes.get(hex);
+    if (!tint) { tint = Color3.FromHexString(hex); palettes.set(hex, tint); }
+    return tint;
+  }
+  const cream = color('#fff0a3'), yellow = color('#ffd04f'), orange = color('#ff842b');
+  const darkOrange = color('#ec5921'), ash = color('#363d38'), grey = color('#69736a'), dustColor = color('#c9b27c'), screenGrey = color('#93a3a1');
+  const unlit = new StandardMaterial('effects-unlit', scene);
+  unlit.diffuseColor = Color3.White(); unlit.emissiveColor = Color3.White();
+  unlit.disableLighting = true; unlit.specularColor = Color3.Black();
+  const smokeMat = new StandardMaterial('effects-faceted-smoke', scene);
+  smokeMat.diffuseColor = Color3.White(); smokeMat.specularColor = Color3.Black();
+  smokeMat.emissiveColor.set(.1, .1, .1);
+  const sources = {
+    shard: MeshBuilder.CreateBox('effects-shards', { size: 1 }, scene),
+    glow: MeshBuilder.CreateIcoSphere('effects-fire', { radius: .5, subdivisions: 1, flat: true }, scene),
+    smoke: MeshBuilder.CreateIcoSphere('effects-smoke', { radius: .5, subdivisions: 1, flat: true }, scene),
+    ring: MeshBuilder.CreateTorus('effects-dust-rings', { diameter: 1, thickness: .055, tessellation: 16 }, scene),
+  };
+  // Keep the fire's facets readable even though it is unlit. This one-time
+  // vertex tint multiplies each instance's orange/yellow colour in the shader.
+  const glowNormals = sources.glow.getVerticesData(VertexBuffer.NormalKind)!;
+  const glowColors = new Float32Array(sources.glow.getTotalVertices() * 4);
+  for (let i = 0; i < sources.glow.getTotalVertices(); i++) {
+    const facing = glowNormals[i * 3] * -.35 + glowNormals[i * 3 + 1] * .8 + glowNormals[i * 3 + 2] * .48;
+    const shade = .92 + facing * .08;
+    glowColors.set([shade, shade, shade, 1], i * 4);
+  }
+  sources.glow.setVerticesData(VertexBuffer.ColorKind, glowColors);
+  const batches = (Object.keys(sources) as ParticleShape[]).map(shape => {
+    const mesh = sources[shape];
+    mesh.material = shape === 'smoke' ? smokeMat : unlit;
+    mesh.isPickable = false; mesh.receiveShadows = false;
+    mesh.alwaysSelectAsActiveMesh = true; mesh.doNotSyncBoundingInfo = true;
+    mesh.hasVertexAlpha = shape === 'smoke';
+    const matrices = new Float32Array(PARTICLE_CAPACITY * 16);
+    const colors = new Float32Array(PARTICLE_CAPACITY * 4);
+    mesh.thinInstanceSetBuffer('matrix', matrices, 16, false);
+    mesh.thinInstanceSetBuffer('color', colors, 4, false);
+    mesh.thinInstanceCount = 0; mesh.setEnabled(false);
+    return { shape, mesh, matrices, colors, count: 0 };
+  });
+  const batchFor = Object.fromEntries(batches.map(batch => [batch.shape, batch])) as Record<ParticleShape, typeof batches[number]>;
+  const particles: Particle[] = Array.from({ length: PARTICLE_CAPACITY }, () => ({
+    position: Vector3.Zero(), velocity: Vector3.Zero(), rotation: Vector3.Zero(), scale: Vector3.One(),
+    color: Color3.White(), life: 0, duration: 1, kind: 'spark', shape: 'shard', size: 1, stretch: 1,
+  }));
+  const sequences: ExplosionSequence[] = Array.from({ length: EXPLOSION_CAPACITY }, () => ({
+    position: Vector3.Zero(), life: 0, age: 0, size: 1, smokeStarted: false, emberClock: 0,
+  }));
+  let cursor = 0, sequenceCursor = 0, disposed = false;
+  const instanceMatrix = Matrix.Identity(), instanceRotation = Quaternion.Identity();
+  function take(kind: ParticleKind, shape: ParticleShape, at: Vector3, duration: number, size: number, tint: Color3): Particle {
+    // Prefer a vacant slot; overload recycles the oldest pool slot without
+    // allocating another mesh, material, light or physics object.
+    for (let i = 0; i < particles.length; i++) {
+      if (particles[cursor].life <= 0) break;
+      cursor = (cursor + 1) % particles.length;
     }
-    materialCache.set(key, mat);
-    return mat;
-  }
-  const smokeMaterial = material('#78817d', true);
-  const darkSmokeMaterial = material('#282e2a', true);
-  darkSmokeMaterial.alpha = 0.34;
-  const tracerMaterial = material('#fff1ad');
-  const seedMesh = MeshBuilder.CreateBox('effect-pool-source', { size: 1 }, scene);
-  seedMesh.isPickable = false;
-  seedMesh.setEnabled(false);
-  const particles: Particle[] = [];
-  for (let i = 0; i < 160; i++) {
-    const mesh = seedMesh.clone(`effect-${i}`, null);
-    mesh.isPickable = false;
-    mesh.receiveShadows = false;
-    mesh.material = tracerMaterial;
-    mesh.setEnabled(false);
-    particles.push({ mesh, velocity: Vector3.Zero(), life: 0, duration: 1, kind: 'spark', size: 0.1 });
-  }
-  let cursor = 0;
-  let disposed = false;
-  function take(kind: Particle['kind'], position: Vector3, life: number, size: number, mat: StandardMaterial): Particle {
-    const p = particles[cursor];
-    cursor = (cursor + 1) % particles.length;
-    p.kind = kind;
-    p.duration = life;
-    p.life = life;
-    p.size = size;
-    p.mesh.material = mat;
-    p.mesh.position.copyFrom(position);
-    p.mesh.rotation.set(0, 0, 0);
-    p.mesh.scaling.setAll(size);
-    p.mesh.visibility = 1;
-    p.mesh.setEnabled(true);
-    p.velocity.set(0, 0, 0);
+    const p = particles[cursor]; cursor = (cursor + 1) % particles.length;
+    p.kind = kind; p.shape = shape; p.life = p.duration = duration; p.size = size; p.stretch = 1;
+    p.position.copyFrom(at); p.velocity.setAll(0); p.rotation.setAll(0); p.scale.setAll(size); p.color.copyFrom(tint);
     return p;
   }
+  function emitSmoke(at: Vector3, size: number, life: number, dark: boolean) {
+    const p = take('smoke', 'smoke', at, life, size, dark ? ash : grey);
+    p.velocity.set((Math.random() - .5) * .8, dark ? 1.5 : .8, (Math.random() - .5) * .8);
+    p.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+    return p;
+  }
+  function emitFlame(at: Vector3, size: number, duration: number, ember = false) {
+    const p = take(ember ? 'ember' : 'fire', 'glow', at, duration, size, Math.random() > .45 ? orange : yellow);
+    p.velocity.set((Math.random() - .5) * 1.4, ember ? 1.2 : 2.1, (Math.random() - .5) * 1.4);
+    p.rotation.set(Math.random() * 2, Math.random() * 2, Math.random() * 2);
+    return p;
+  }
+  function burst(position: Vector3, hex: string, count = 18, power = 5) {
+    if (disposed) return;
+    const tint = color(hex), total = Math.max(0, Math.min(PARTICLE_CAPACITY, Math.floor(count)));
+    for (let i = 0; i < total; i++) {
+      const p = take('spark', 'shard', position, .32 + Math.random() * .46, .07 + Math.random() * .13, tint);
+      const angle = Math.random() * Math.PI * 2, speed = power * (.3 + Math.random() * .7);
+      p.velocity.set(Math.cos(angle) * speed, power * (.2 + Math.random() * .65), Math.sin(angle) * speed);
+      p.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+      p.stretch = 1 + Math.random() * 3;
+    }
+  }
+  function clear() {
+    for (const p of particles) p.life = 0;
+    for (const s of sequences) s.life = 0;
+    for (const batch of batches) { batch.count = 0; batch.mesh.thinInstanceCount = 0; batch.mesh.setEnabled(false); }
+  }
   return {
-    burst(position: Vector3, color: string, count = 18, power = 5): void {
+    burst,
+    smoke(position: Vector3, dark = false): void {
+      if (!disposed) emitSmoke(position, dark ? .55 : .23, dark ? 1.8 : 1.1, dark);
+    },
+    /** Call every .35 s while the smoke canister is active. Seven overlapping
+     * low lobes cover the playable 8 m radius using the existing smoke batch. */
+    smokeScreen(position: Vector3): void {
       if (disposed) return;
-      const mat = material(color);
-      const total = Math.max(0, Math.min(160, Math.floor(count)));
-      for (let i = 0; i < total; i++) {
-        const p = take('spark', position, 0.32 + Math.random() * 0.46, 0.07 + Math.random() * 0.13, mat);
-        const angle = Math.random() * Math.PI * 2;
-        const speed = power * (0.3 + Math.random() * 0.7);
-        p.velocity.set(Math.cos(angle) * speed, power * (0.2 + Math.random() * 0.65), Math.sin(angle) * speed);
-        p.mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+      for (let i = 0; i < 7; i++) {
+        const p = emitSmoke(position, i === 0 ? 7 : 5.8, 1.35, false);
+        const angle = (i - 1) * Math.PI / 3;
+        if (i > 0) p.position.addInPlaceFromFloats(Math.cos(angle) * 4, 0, Math.sin(angle) * 4);
+        p.position.y += .9 + (i % 2) * .25;
+        p.velocity.set(i > 0 ? Math.cos(angle) * .12 : 0, .28, i > 0 ? Math.sin(angle) * .12 : 0);
+        p.color.copyFrom(screenGrey).scaleInPlace(.9 + (i % 3) * .06);
+        p.rotation.set(0, Math.random() * Math.PI * 2, 0);
+        p.stretch = .55;
       }
     },
-    smoke(position: Vector3, dark = false): void {
+    explosion(position: Vector3, kind: ExplosionKind = 'car'): void {
       if (disposed) return;
-      const p = take('smoke', position, 0.9 + Math.random() * 0.4, dark ? 0.4 + Math.random() * 0.2 : 0.15 + Math.random() * 0.13, dark ? darkSmokeMaterial : smokeMaterial);
-      p.velocity.set((Math.random() - 0.5) * 0.6, (dark ? 1.5 : 0.65) + Math.random() * 0.65, (Math.random() - 0.5) * 0.6);
-      p.mesh.rotation.set(Math.random(), Math.random(), Math.random());
+      const camera = scene.activeCamera;
+      const distant = !!camera && Vector3.DistanceSquared(camera.globalPosition, position) > 95 * 95;
+      const size = (kind === 'helicopter' ? 1.5 : kind === 'impact' ? .72 : 1) * (distant ? .8 : 1);
+      const sequence = sequences[sequenceCursor]; sequenceCursor = (sequenceCursor + 1) % sequences.length;
+      sequence.position.copyFrom(position); sequence.life = distant ? 1.5 : 2.8;
+      sequence.age = 0; sequence.size = size; sequence.smokeStarted = false; sequence.emberClock = .6;
+      const flash = take('flash', 'glow', position, .12, 2.3 * size, cream);
+      flash.position.y += .35;
+      const core = emitFlame(position, 1.25 * size, .34);
+      core.color.copyFrom(cream); core.position.y += .55;
+      core.velocity.set(0, 1.4 * size, 0);
+      // Two bright tongues clear the outer orange lobes. Their upward motion
+      // leaves the hot centre visible from the elevated gameplay camera.
+      for (const side of [-1, 1]) {
+        const tongue = emitFlame(position, .95 * size, .5);
+        tongue.color.copyFrom(side < 0 ? cream : yellow);
+        tongue.position.addInPlaceFromFloats(side * .85 * size, .95 * size, .55 * size);
+        tongue.velocity.set(side * .5 * size, 5 * size, 1.2 * size);
+      }
+      if (position.y < 3) {
+        const ring = take('dust', 'ring', position, .55, 1.2 * size, dustColor);
+        ring.position.y = .09; ring.stretch = 9 * size;
+      }
+      for (let i = 0; i < (distant ? 3 : 7); i++) {
+        const p = emitFlame(position, (1.3 + Math.random()) * size, .42 + Math.random() * .23);
+        const angle = i * 2.399;
+        p.velocity.set(Math.cos(angle) * size * 2.7, (1.7 + Math.random() * 3.2) * size, Math.sin(angle) * size * 2.7);
+        p.position.y += .25; p.color.copyFrom(i % 3 ? orange : yellow);
+      }
+      burst(position, '#ffd04f', distant ? 5 : 12, size * 10);
+      burst(position, '#42483e', distant ? 3 : 7, size * 7);
     },
     tracer(from: Vector3, to: Vector3): void {
       if (disposed) return;
-      const p = take('tracer', from, 0.07, 0.035, tracerMaterial);
-      const dx = to.x - from.x;
-      const dy = to.y - from.y;
-      const dz = to.z - from.z;
-      const horizontal = Math.sqrt(dx * dx + dz * dz);
-      const length = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      p.mesh.position.set((from.x + to.x) * 0.5, (from.y + to.y) * 0.5, (from.z + to.z) * 0.5);
-      p.mesh.scaling.set(0.035, 0.035, Math.max(0.04, length));
-      p.mesh.rotation.set(-Math.atan2(dy, horizontal), Math.atan2(dx, dz), 0);
+      const p = take('tracer', 'shard', from, .07, .035, cream);
+      const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
+      p.position.set((from.x + to.x) * .5, (from.y + to.y) * .5, (from.z + to.z) * .5);
+      p.scale.set(.035, .035, Math.max(.04, Math.hypot(dx, dy, dz)));
+      p.rotation.set(-Math.atan2(dy, Math.hypot(dx, dz)), Math.atan2(dx, dz), 0);
     },
     update(dt: number): void {
-      if (disposed) return;
-      const step = Math.max(0, Math.min(dt, 0.06));
-      for (const p of particles) {
-        if (p.life <= 0) continue;
-        p.life -= step;
-        if (p.life <= 0) {
-          p.mesh.setEnabled(false);
-          continue;
-        }
-        const ratio = p.life / p.duration;
-        if (p.kind === 'tracer') {
-          p.mesh.visibility = Math.min(1, ratio * 3);
-          continue;
-        }
-        p.mesh.position.addInPlaceFromFloats(p.velocity.x * step, p.velocity.y * step, p.velocity.z * step);
-        if (p.kind === 'smoke') {
-          const size = p.size + (1 - ratio) * 0.75;
-          p.mesh.scaling.setAll(size);
-          p.mesh.visibility = Math.min(0.85, ratio * 1.3);
-          p.mesh.rotation.y += step * 0.2;
-        } else {
-          p.velocity.y -= step * 11;
-          p.velocity.x *= 1 - step * 0.7;
-          p.velocity.z *= 1 - step * 0.7;
-          if (p.mesh.position.y < 0.04) {
-            p.mesh.position.y = 0.04;
-            p.velocity.y = Math.abs(p.velocity.y) * 0.28;
+      if (disposed || !Number.isFinite(dt)) return;
+      const step = Math.max(0, Math.min(dt, .06));
+      for (const s of sequences) {
+        if (s.life <= 0) continue;
+        s.age += step; s.life -= step;
+        if (!s.smokeStarted && s.age >= .10) {
+          s.smokeStarted = true;
+          for (let i = 0; i < 7; i++) {
+            const p = emitSmoke(s.position, (.57 + Math.random() * .53) * s.size, 1.8 + Math.random() * .9, true);
+            const angle = i * 2.399;
+            p.velocity.set(Math.cos(angle) * s.size, 1.8 + (i % 3) * .95, Math.sin(angle) * s.size);
+            p.position.y += .3 + i * .12; p.color.scaleInPlace(.9 + (i % 3) * .16);
           }
-          p.mesh.rotation.x += step * 4;
-          p.mesh.rotation.z += step * 3;
-          p.mesh.scaling.setAll(p.size * Math.min(1, ratio * 3));
-          p.mesh.visibility = Math.min(1, ratio * 4);
+        }
+        s.emberClock -= step;
+        if (s.emberClock <= 0 && s.age > .55 && s.life > .2) {
+          s.emberClock = .2;
+          const p = emitFlame(s.position, (.38 + Math.random() * .35) * s.size, .55, true);
+          p.position.x += (Math.random() - .5) * 1.9 * s.size;
+          p.position.z += (Math.random() - .5) * 1.9 * s.size;
+          p.position.y += .1;
+          if (s.life > 1) emitSmoke(p.position, .45 * s.size, 1.5, true);
         }
       }
+      for (const batch of batches) batch.count = 0;
+      for (const p of particles) {
+        if (p.life <= 0) continue;
+        p.life -= step; if (p.life <= 0) continue;
+        const ratio = p.life / p.duration, age = 1 - ratio;
+        p.position.addInPlaceFromFloats(p.velocity.x * step, p.velocity.y * step, p.velocity.z * step);
+        let alpha = 1;
+        if (p.kind === 'smoke') {
+          const screen = p.stretch < 1, size = p.size * (1 + age * (screen ? .35 : 1.5));
+          p.scale.set(size, size * p.stretch, size);
+          p.rotation.y += step * .18; alpha = Math.min(screen ? .72 : .94, ratio * 3);
+        } else if (p.kind === 'flash') {
+          p.scale.setAll(p.size * (.55 + age * 1.5) * Math.min(1, ratio * 4));
+        } else if (p.kind === 'fire' || p.kind === 'ember') {
+          const pulse = Math.pow(Math.sin(Math.PI * age), .6), size = p.size * (.18 + pulse) * Math.min(1, ratio * 3);
+          p.scale.set(size, size * (p.kind === 'ember' ? 1.7 : 1.15), size);
+          if (age > .55) Color3.LerpToRef(p.color, darkOrange, step * 8, p.color);
+        } else if (p.kind === 'dust') {
+          const diameter = p.size + age * p.stretch;
+          p.scale.set(diameter, Math.max(.03, ratio * .35), diameter);
+        } else if (p.kind === 'spark') {
+          p.velocity.y -= step * 11;
+          p.velocity.x *= 1 - step * .7; p.velocity.z *= 1 - step * .7;
+          if (p.position.y < .04) { p.position.y = .04; p.velocity.y = Math.abs(p.velocity.y) * .28; }
+          p.rotation.x += step * 4; p.rotation.z += step * 3;
+          const size = p.size * Math.min(1, ratio * 3);
+          p.scale.set(size, size * p.stretch, size);
+        }
+        const batch = batchFor[p.shape], index = batch.count++;
+        Quaternion.FromEulerAnglesToRef(p.rotation.x, p.rotation.y, p.rotation.z, instanceRotation);
+        Matrix.ComposeToRef(p.scale, instanceRotation, p.position, instanceMatrix);
+        instanceMatrix.copyToArray(batch.matrices, index * 16);
+        const offset = index * 4;
+        batch.colors[offset] = p.color.r; batch.colors[offset + 1] = p.color.g;
+        batch.colors[offset + 2] = p.color.b; batch.colors[offset + 3] = alpha;
+      }
+      for (const batch of batches) {
+        batch.mesh.thinInstanceCount = batch.count; batch.mesh.setEnabled(batch.count > 0);
+        if (!batch.count) continue;
+        batch.mesh.thinInstanceBufferUpdated('matrix');
+        batch.mesh.thinInstanceBufferUpdated('color');
+      }
+    },
+    clear,
+    getStats() {
+      const byKind: Record<ParticleKind, number> = { spark: 0, smoke: 0, tracer: 0, flash: 0, fire: 0, dust: 0, ember: 0 };
+      for (const p of particles) if (p.life > 0) byKind[p.kind]++;
+      return { capacity: PARTICLE_CAPACITY, active: Object.values(byKind).reduce((a, b) => a + b, 0),
+        sequences: sequences.filter(s => s.life > 0).length, batches: batches.filter(b => b.count > 0).length, byKind };
     },
     dispose(): void {
-      if (disposed) return;
-      disposed = true;
-      for (const p of particles) p.mesh.dispose(false, false);
-      seedMesh.dispose(false, false);
-      for (const mat of materialCache.values()) mat.dispose();
-      materialCache.clear();
+      if (disposed) return; clear(); disposed = true;
+      for (const batch of batches) batch.mesh.dispose(false, false);
+      unlit.dispose(); smokeMat.dispose(); palettes.clear();
     },
   };
 }
@@ -153,6 +276,7 @@ export interface HelicopterVisual {
   hull: TransformNode;
   tail: TransformNode;
   skids: TransformNode[];
+  setWeapons(enabled: boolean): void;
   beginCrash(): void;
   releaseDebris(): Mesh[];
   dispose(): void;
@@ -160,20 +284,22 @@ export interface HelicopterVisual {
 
 /** Separate semantic groups survive material batching: the caller owns the crash
  * trajectory, rotor speed and the physics/lifetime of released fragments. */
-export function createHelicopter(scene: Scene): HelicopterVisual {
+export function createHelicopter(scene: Scene, variant: 'observer' | 'transport' = 'observer'): HelicopterVisual {
+  const heavy = variant === 'transport';
   const root=new TransformNode('police-helicopter',scene);
+  root.metadata = { variant };
   const hullGroup=new TransformNode('helicopter-hull',scene);hullGroup.parent=root;
-  const tailGroup=new TransformNode('helicopter-tail',scene);tailGroup.parent=root;tailGroup.position.set(0,.10,-1.18);
-  const rotor=new TransformNode('helicopter-main-rotor',scene);rotor.parent=root;rotor.position.set(0,1.01,-.17);
-  const skidGroups=[-1,1].map(side=>{const node=new TransformNode(side<0?'helicopter-left-skid':'helicopter-right-skid',scene);node.parent=root;node.position.set(side*.92,-.84,.03);return node;});
-  const semantic=[{node:hullGroup,id:'hull',mass:90},{node:tailGroup,id:'tail',mass:20},{node:rotor,id:'main-rotor',mass:12},{node:skidGroups[0],id:'left-skid',mass:8},{node:skidGroups[1],id:'right-skid',mass:8}];
+  const tailGroup=new TransformNode('helicopter-tail',scene);tailGroup.parent=root;tailGroup.position.set(0,.10,heavy ? -2.03 : -1.18);
+  const rotor=new TransformNode('helicopter-main-rotor',scene);rotor.parent=root;rotor.position.set(0,heavy ? 1.35 : 1.01,heavy ? -.42 : -.17);
+  const skidGroups=[-1,1].map(side=>{const node=new TransformNode(side<0?'helicopter-left-skid':'helicopter-right-skid',scene);node.parent=root;node.position.set(side*(heavy?1.12:.92),heavy?-.98:-.84,heavy?-.25:.03);return node;});
+  const semantic=[{node:hullGroup,id:'hull',mass:heavy?155:90},{node:tailGroup,id:'tail',mass:25},{node:rotor,id:'main-rotor',mass:15},{node:skidGroups[0],id:'left-skid',mass:8},{node:skidGroups[1],id:'right-skid',mass:8}];
   const materials:StandardMaterial[]=[],weapons:Mesh[]=[];
   const batches=new Map<TransformNode,Map<StandardMaterial,Mesh[]>>();
   function material(name:string,hex:string):StandardMaterial {
-    const mat=new StandardMaterial(name,scene);mat.diffuseColor=Color3.FromHexString(hex);mat.specularColor=new Color3(.12,.14,.13);mat.backFaceCulling=false;materials.push(mat);return mat;
+    const mat=new StandardMaterial(name,scene);mat.diffuseColor=Color3.FromHexString(hex);mat.specularColor=Color3.Black();mat.backFaceCulling=false;materials.push(mat);return mat;
   }
-  const hull=material('helicopter-charcoal','#384640'),trim=material('helicopter-trim','#202a27'),canopy=material('helicopter-canopy','#203d42'),stripe=material('helicopter-ivory','#d9dfca'),red=material('helicopter-warning','#ed6949');
-  canopy.specularColor=new Color3(.25,.37,.35);red.emissiveColor=new Color3(.5,.06,.01);
+  const hull=material('helicopter-charcoal','#354d5a'),trim=material('helicopter-trim','#202c30'),canopy=material('helicopter-canopy','#15343b'),stripe=material('helicopter-ivory','#e8e3ce'),red=material('helicopter-warning','#ed6949');
+  red.emissiveColor=new Color3(.5,.06,.01);
   function register(mesh:Mesh,mat:StandardMaterial,parent=hullGroup,batch=true):Mesh {
     mesh.material=mat;mesh.parent=parent;mesh.isPickable=false;mesh.receiveShadows=true;
     if(batch){let map=batches.get(parent);if(!map){map=new Map();batches.set(parent,map);}const group=map.get(mat)??[];group.push(mesh);map.set(mat,group);}return mesh;
@@ -187,34 +313,71 @@ export function createHelicopter(scene: Scene): HelicopterVisual {
     VertexData.ComputeNormals(positions,indices,normals,{useRightHandedSystem:true});const data=new VertexData();data.positions=positions;data.indices=indices;data.normals=normals;data.uvs=new Array(positions.length/3*2).fill(0);const mesh=new Mesh(name,scene);data.applyToMesh(mesh);return register(mesh,mat,parent);
   }
   // Angular fuselage with an actual sloping windscreen, not a glass box.
-  const sections=[{z:1.40,w:1.12,lo:-.25,hi:.20},{z:.50,w:1.75,lo:-.55,hi:.60},{z:-1.0,w:1.05,lo:-.35,hi:.38},{z:-1.40,w:.42,lo:-.15,hi:.20}];
+  const sections=heavy
+    ? [{z:1.72,w:1.35,lo:-.30,hi:.26},{z:.63,w:2.02,lo:-.65,hi:.86},{z:-1.57,w:1.88,lo:-.56,hi:.76},{z:-2.30,w:.48,lo:-.13,hi:.30}]
+    : [{z:1.40,w:1.12,lo:-.25,hi:.20},{z:.50,w:1.75,lo:-.55,hi:.60},{z:-1.0,w:1.05,lo:-.35,hi:.38},{z:-1.40,w:.42,lo:-.15,hi:.20}];
   const rings=sections.map(s=>[[-s.w/2+.10,s.lo,s.z],[s.w/2-.10,s.lo,s.z],[s.w/2,s.lo+.10,s.z],[s.w/2,s.hi-.10,s.z],[s.w/2-.10,s.hi,s.z],[-s.w/2+.10,s.hi,s.z],[-s.w/2,s.hi-.10,s.z],[-s.w/2,s.lo+.10,s.z]]);
   const faces:number[][][]=[rings[0],rings.at(-1)!.slice().reverse()];for(let r=0;r<rings.length-1;r++)for(let i=0;i<8;i++){const j=(i+1)%8;faces.push([rings[r][i],rings[r+1][i],rings[r+1][j],rings[r][j]]);}poly('faceted-fuselage',faces,hull);
-  poly('sloped-helicopter-windscreen',[[[-.48,.02,1.42],[.48,.02,1.42],[.67,.46,.86],[-.67,.46,.86]]],canopy);
-  box('windscreen-divider',.045,.56,.055,0,.24,1.15,hull).rotation.x=-.87;
-  box('belly-armor',1.12,.19,1.75,0,-.48,-.04,trim);
-  box('engine-cowling',.94,.34,1.17,0,.66,-.40,hull);
+  poly('sloped-helicopter-windscreen',heavy
+    ? [[[-.60,.04,1.75],[.60,.04,1.75],[.83,.74,.81],[-.83,.74,.81]]]
+    : [[[-.48,.02,1.42],[.48,.02,1.42],[.67,.46,.86],[-.67,.46,.86]]],canopy);
+  box('windscreen-divider',.055,heavy?.95:.64,.07,0,heavy?.40:.24,heavy?1.28:1.15,stripe).rotation.x=-.87;
+  box('nose-ivory-chin',heavy?1.25:1.04,.17,.16,0,-.18,heavy?1.73:1.40,stripe);
+  box('belly-armor',heavy?1.50:1.12,.19,heavy?3.1:1.75,0,heavy?-.61:-.48,heavy?-.43:-.04,trim);
+  box('engine-cowling',heavy?1.30:.94,heavy?.38:.34,heavy?1.65:1.17,0,heavy?.95:.66,heavy?-.65:-.40,hull);
   const boom=MeshBuilder.CreateCylinder('tapered-tail-boom',{diameterTop:.43,diameterBottom:.15,height:2.52,tessellation:8},scene);boom.rotation.x=Math.PI/2;boom.rotation.z=.03;boom.position.set(0,.04,-1.16);register(boom,hull,tailGroup);
   box('vertical-tail-fin',.11,.92,.68,0,.45,-2.23,hull,tailGroup).rotation.x=-.14;
+  box('tail-ivory-tip',.12,.21,.49,0,.88,-2.26,stripe,tailGroup);
+  box('tail-warning-light',.10,.10,.10,0,1.02,-2.20,red,tailGroup);
   box('tail-stabilizer',1.15,.075,.43,0,.13,-1.98,stripe,tailGroup);
   box('tail-rotor-vertical',.035,.85,.07,.21,.40,-2.24,trim,tailGroup);
   box('tail-rotor-horizontal',.035,.07,.85,.21,.40,-2.24,trim,tailGroup);
-  box('short-wings',3.0,.10,.43,0,-.19,-.17,hull);
+  const wing=box('short-wings',heavy?3.35:3.0,.10,.43,0,-.19,-.17,hull,hullGroup,false);weapons.push(wing);
   for(const side of [-1,1]) {
-    const sideGlass=[[side*.89,-.04,.48],[side*.745,-.04,-.25],[side*.745,.35,-.25],[side*.89,.43,.48]];if(side<0)sideGlass.reverse();poly('side-canopy',[sideGlass],canopy);
-    box('door-stripe',.035,.12,.91,side*.83,-.09,-.20,stripe);
+    const sideGlass=heavy
+      ? [[side*1.02,-.05,.57],[side*1.00,-.05,-.12],[side*1.00,.59,-.12],[side*1.02,.70,.57]]
+      : [[side*.89,-.04,.48],[side*.745,-.04,-.25],[side*.745,.35,-.25],[side*.89,.43,.48]];
+    if(side<0)sideGlass.reverse();poly('side-canopy',[sideGlass],canopy);
+    box('door-stripe',.045,.16,heavy?2.18:.91,side*(heavy?.99:.83),-.16,heavy?-.52:-.20,stripe);
+    box('door-handle',.055,.045,.19,side*(heavy?1.025:.82),-.20,heavy?-.39:-.30,trim);
+    if(heavy) {
+      box('cargo-door',.055,1.12,.78,side*.99,.04,-.62,stripe);
+      box('cargo-door-panel',.065,.96,.59,side*1.025,.04,-.62,hull);
+      box('cargo-window',.035,.32,.33,side*1.065,.24,-.62,canopy);
+      box('cargo-door-rail',.07,.055,1.38,side*1.02,.65,-.89,trim);
+      for(const z of [-1.23,-1.57])box('rear-cabin-window',.045,.32,.24,side*.955,.29,z,canopy);
+      box('cargo-step',.24,.055,1.10,side*1.07,-.70,-.67,stripe);
+      box('engine-intake',.14,.22,.51,side*.67,.99,-.39,trim);
+      for(const z of [-.63,-.51,-.39,-.27])box('intake-louvre',.16,.026,.035,side*.69,1.00,z,hull);
+    } else {
+      box('ivory-door-pillar',.065,.59,.085,side*.80,.15,-.28,stripe);
+      box('rear-cabin-ivory',.055,.48,.40,side*.67,.07,-.61,stripe);
+      box('rear-cabin-window',.065,.29,.21,side*.70,.12,-.61,canopy);
+    }
     const pod=MeshBuilder.CreateCylinder('helicopter-weapon-pod',{diameter:.25,height:.92,tessellation:8},scene);pod.position.set(side*1.30,-.27,.10);pod.rotation.x=Math.PI/2;register(pod,trim,hullGroup,false);weapons.push(pod);
-    box('navigation-light',.11,.09,.09,side*1.46,-.10,-.17,red);
+    box('navigation-light',.11,.09,.09,side*(heavy?1.03:.89),.46,.38,red);
   }
+  if(!heavy) {
+    const sensor=MeshBuilder.CreateIcoSphere('observation-camera',{radius:.21,subdivisions:1,flat:true},scene);sensor.position.set(0,-.66,.70);register(sensor,trim);
+    box('camera-lens',.14,.12,.055,0,-.65,.91,canopy);
+    box('searchlight-arm',.42,.06,.06,-.57,-.45,.89,trim);
+    box('searchlight-housing',.26,.25,.24,-.79,-.45,.92,trim);
+    box('searchlight-lens',.20,.18,.035,-.79,-.45,1.06,stripe);
+  }
+  box('roof-antenna',.025,.43,.025,0,heavy?1.20:.92,heavy?-1.46:-.92,trim);
   for(let i=0;i<2;i++) {
-    const side=i===0?-1:1,node=skidGroups[i];box('landing-skid',.09,.09,2.48,0,0,0,trim,node);
-    box('upturned-skid-tip',.09,.08,.34,0,.055,1.34,trim,node).rotation.x=-.33;
-    for(const z of [-.65,.67])box('skid-strut',.075,.60,.075,-side*.16,.28,z,trim,node).rotation.z=side*.53;
+    const side=i===0?-1:1,node=skidGroups[i];box('landing-skid',.11,.10,heavy?3.55:2.48,0,0,0,trim,node);
+    box('upturned-skid-tip',.11,.09,.34,0,.055,heavy?1.86:1.34,trim,node).rotation.x=-.33;
+    for(const z of heavy?[-1.09,1.02]:[-.65,.67])box('skid-strut',.085,.66,.085,-side*.16,.30,z,trim,node).rotation.z=side*.53;
   }
-  box('rotor-shaft',.09,.36,.09,0,.86,-.17,trim);
-  box('rotor-blade-x',5.75,.032,.15,0,0,0,trim,rotor);
-  box('rotor-blade-z',.15,.032,5.75,0,0,0,trim,rotor);
+  box('rotor-shaft',.12,.36,.12,0,heavy?1.20:.86,heavy?-.42:-.17,trim);
+  box('rotor-blade-x',heavy?7.3:5.75,.042,.18,0,0,0,trim,rotor);
+  box('rotor-blade-z',.18,.042,heavy?7.3:5.75,0,0,0,trim,rotor);
   box('rotor-hub',.25,.10,.25,0,.03,0,hull,rotor);
+  for(const side of [-1,1]) {
+    box('rotor-tip-x',.28,.045,.18,side*(heavy?3.47:2.70),0,0,stripe,rotor);
+    box('rotor-tip-z',.18,.045,.28,0,0,side*(heavy?3.47:2.70),stripe,rotor);
+  }
 
   // Merge inside a part, never across the tail, skids or rotor pivots.
   for(const [parent,map] of batches)for(const [mat,meshes] of map) {
@@ -223,8 +386,10 @@ export function createHelicopter(scene: Scene): HelicopterVisual {
     merged.parent=null;merged.bakeTransformIntoVertices(inverse);merged.position.setAll(0);merged.rotation.setAll(0);merged.rotationQuaternion=null;merged.scaling.setAll(1);merged.parent=parent;merged.material=mat;merged.isPickable=false;merged.receiveShadows=true;merged.name='helicopter-'+parent.name+'-'+mat.name;
   }
   let disposed=false,crashing=false,released=false;
+  for(const weapon of weapons)weapon.setEnabled(heavy);
   return {
     root,rotor,hull:hullGroup,tail:tailGroup,skids:skidGroups,
+    setWeapons(enabled:boolean):void {if(disposed||crashing)return;for(const weapon of weapons)weapon.setEnabled(enabled);},
     beginCrash():void {
       if(disposed||crashing)return;crashing=true;root.metadata={...root.metadata,crashing:true};
       for(const weapon of weapons)weapon.setEnabled(false);

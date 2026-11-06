@@ -1,11 +1,13 @@
 import { Mesh, Scene, StandardMaterial, Color3, VertexData, VertexBuffer, Material } from '@babylonjs/core';
-export type SurfaceKind='asphalt'|'sand'|'grass'|'dirt';
+import type { SurfaceKind } from './types';
+export type { SurfaceKind } from './types';
 type Contact={lx:number;lz:number;rx:number;rz:number;surface:SurfaceKind};
 const style:Record<SurfaceKind,{width:number;life:number;alpha:number;color:readonly number[]}>={
  asphalt:{width:.21,life:52,alpha:.86,color:[.035,.039,.034]},
  sand:{width:.29,life:25,alpha:.64,color:[.46,.33,.18]},
  grass:{width:.33,life:14,alpha:.55,color:[.25,.33,.13]},
  dirt:{width:.28,life:34,alpha:.7,color:[.29,.2,.12]},
+ snow:{width:.32,life:30,alpha:.64,color:[.43,.54,.58]},
 };
 /** Surface-coloured tyre ribbons share one bounded buffer and one draw call. */
 export function createSkids(scene:Scene){

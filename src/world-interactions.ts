@@ -10,15 +10,27 @@ type Runtime = {
   jet?: Mesh;
   velocity: Vector3; wobble: number; fade: number; blockedUntil: number;
   fadeMaterials: StandardMaterial[]; rotor?: TransformNode;
+  meshes: Mesh[]; originalMaterials: (Mesh['material'])[];
   group?: string;
 };
 type Fragment = { mesh: Mesh; velocity: Vector3; spin: Vector3; life: number };
 export interface PropOptions { kind?: string; interaction?: Interaction; height?: number; mass?: number; width?: number; depth?: number; angle?: number; group?: string; }
 
+/** Contact tests must work before rendering, including for invisible physics bodies. */
+export function meshesIntersectNow(actor: Mesh, prop: Mesh): boolean {
+  actor.computeWorldMatrix(true);
+  prop.computeWorldMatrix(true);
+  return actor.intersectsMesh(prop, true);
+}
+
 /** Object state outlives streamed geometry. Only nearby moving debris receives updates. */
 export function createWorldInteractions(scene: Scene, shadow?: ShadowGenerator) {
   const saved = new Map<string, SavedProp>();
   const active = new Map<WorldProp, Runtime>();
+  const animated = new Set<Runtime>();
+  const occluders = new Set<Runtime>();
+  const fading = new Set<Runtime>();
+  const groups = new Map<string, Set<Runtime>>();
   const fragments: Fragment[] = [];
   const rubbleMaterial = new StandardMaterial('world-rubble', scene);
   rubbleMaterial.diffuseColor = Color3.FromHexString('#8c806b');
@@ -50,6 +62,7 @@ export function createWorldInteractions(scene: Scene, shadow?: ShadowGenerator) 
     if(p.kind==='hydrant') {
       const jet=MeshBuilder.CreateCylinder('hydrant-water-jet',{height:3.4,diameterBottom:.18,diameterTop:.7,tessellation:7},scene);
       jet.position.set(p.x,1.9,p.z);jet.material=waterMaterial;jet.isPickable=false;runtime.jet=jet;
+      animated.add(runtime);
     }
   }
   function paintDamage(runtime: Runtime): void {
@@ -71,11 +84,11 @@ export function createWorldInteractions(scene: Scene, shadow?: ShadowGenerator) 
     Object.assign(p, { id, kind: options.kind ?? (p.breakable ? 'street-prop' : 'solid'), interaction: options.interaction ?? (p.breakable ? 'breakable' : 'solid'), mass: options.mass ?? (p.breakable ? 30 : 10000), width: options.width, depth: options.depth, angle: options.angle ?? 0 });
     const originX = p.x, originZ = p.z, mesh = p.mesh;
     const colors: Runtime['colors'] = [];
+    const meshes = visible ? [mesh, ...mesh.getChildMeshes()].filter((part):part is Mesh=>part instanceof Mesh) : [];
     if (visible) {
       // Geometry is authored in world coordinates. Rebase all batches together,
       // including emissive children, so moving a prop cannot move another object.
-      for (const part of [mesh, ...mesh.getChildMeshes()]) {
-        if (!(part instanceof Mesh)) continue;
+      for (const part of meshes) {
         part.unfreezeWorldMatrix(); part.bakeTransformIntoVertices(Matrix.Translation(-originX, 0, -originZ));
         const original = part.getVerticesData(VertexBuffer.ColorKind);
         if (original) colors.push({ mesh: part, original: Float32Array.from(original) });
@@ -85,10 +98,13 @@ export function createWorldInteractions(scene: Scene, shadow?: ShadowGenerator) 
       const bounds = mesh.getBoundingInfo().boundingBox;
       p.height = options.height ?? Math.max(.3, bounds.maximumWorld.y);
       mesh.metadata = { ...mesh.metadata, worldPropId: id, interaction: p.interaction, occluder: p.height > 2.4 };
+      for(const part of meshes) part.freezeWorldMatrix();
     } else p.height = options.height ?? 2;
     p.hp = state.hp; p.x += state.dx; p.z += state.dz; p.active = !state.destroyed;
-    const runtime: Runtime = { prop: p, state, originX, originZ, maxHp: initial.hp, colors, velocity: Vector3.Zero(), wobble: 0, fade: 1, blockedUntil: 0, fadeMaterials: [], group: options.group };
+    const runtime: Runtime = { prop: p, state, originX, originZ, maxHp: initial.hp, colors, velocity: Vector3.Zero(), wobble: 0, fade: 1, blockedUntil: 0, fadeMaterials: [], group: options.group, meshes, originalMaterials:meshes.map(part=>part.material) };
     active.set(prop, runtime);
+    if(visible&&(p.height??0)>2.4)occluders.add(runtime);
+    if(runtime.group){let members=groups.get(runtime.group);if(!members)groups.set(runtime.group,members=new Set());members.add(runtime);}
     if (state.destroyed) { mesh.setEnabled(false); rubble(runtime); }
     else if (prior && state.hp < runtime.maxHp) paintDamage(runtime);
   }
@@ -101,6 +117,8 @@ export function createWorldInteractions(scene: Scene, shadow?: ShadowGenerator) 
     for (const mat of runtime.fadeMaterials) mat.dispose();
     for (const mesh of [prop.mesh, ...prop.mesh.getChildMeshes()]) shadow?.removeShadowCaster(mesh as Mesh);
     prop.mesh.dispose(); active.delete(prop);
+    animated.delete(runtime);occluders.delete(runtime);fading.delete(runtime);
+    if(runtime.group){const members=groups.get(runtime.group);members?.delete(runtime);if(!members?.size)groups.delete(runtime.group);}
   }
   function shatter(runtime: Runtime, impulse?: Vector3): void {
     const p = runtime.prop;
@@ -121,6 +139,7 @@ export function createWorldInteractions(scene: Scene, shadow?: ShadowGenerator) 
     const p = runtime.prop;
     runtime.state.hp = Math.max(p.interaction === 'solid' ? runtime.maxHp * .3 : 0, runtime.state.hp - damage);
     p.hp = runtime.state.hp; runtime.wobble = p.interaction === 'solid' ? 0 : .25;
+    if(runtime.wobble>0||p.interaction==='movable'){for(const mesh of runtime.meshes)mesh.unfreezeWorldMatrix();animated.add(runtime);}
     if (p.interaction === 'movable') {
       const push = impulse ?? new Vector3(1, 0, .4);
       const force = Math.min(8, damage * 18 / Math.max(20, p.mass ?? 30));
@@ -141,14 +160,14 @@ export function createWorldInteractions(scene: Scene, shadow?: ShadowGenerator) 
       else for (const other of active.values()) if (other !== runtime && other.prop.active && Math.hypot(other.prop.x - p.x, other.prop.z - p.z) < 7) damageProp(other.prop, 80, other.prop.mesh.position.subtract(at));
     }
   }
-  function attachRotor(prop: WorldProp, rotor: TransformNode): void { const runtime = active.get(prop); if (runtime) runtime.rotor = rotor; }
+  function attachRotor(prop: WorldProp, rotor: TransformNode): void { const runtime = active.get(prop); if (runtime) {runtime.rotor = rotor;animated.add(runtime);} }
   function update(dt: number, x: number, z: number): void {
     const step = Math.max(0, Math.min(.05, dt)); clock += step;
-    for (const runtime of active.values()) {
+    for (const runtime of animated) {
       const p = runtime.prop;
       if(runtime.jet)runtime.jet.scaling.y=.92+Math.sin(clock*12+p.x)*.08;
-      if (!p.active) continue;
-      if (runtime.rotor && Math.hypot(p.x - x, p.z - z) < 180) runtime.rotor.rotation.z += step * .85 * (.2 + .8 * p.hp / runtime.maxHp);
+      if (!p.active) {if(!runtime.jet)animated.delete(runtime);continue;}
+      if (runtime.rotor && (p.x-x)**2+(p.z-z)**2 < 180*180) runtime.rotor.rotation.z += step * .85 * (.2 + .8 * p.hp / runtime.maxHp);
       if (runtime.wobble > 0) { runtime.wobble = Math.max(0, runtime.wobble - step); p.mesh.rotation.z = Math.sin(runtime.wobble * 55) * runtime.wobble * .12; }
       else if (!runtime.rotor) p.mesh.rotation.z = 0;
       if (runtime.velocity.lengthSquared() > .0001) {
@@ -162,12 +181,15 @@ export function createWorldInteractions(scene: Scene, shadow?: ShadowGenerator) 
           const localX=Math.cos(angle)*dx-Math.sin(angle)*dz,localZ=Math.sin(angle)*dx+Math.cos(angle)*dz;
           if(Math.abs(localX)<(obstacle.width??obstacle.radius*1.6)/2+p.radius*.65&&Math.abs(localZ)<(obstacle.depth??obstacle.radius*1.6)/2+p.radius*.65){blocked=true;break;}
         }
-        if(blocked){runtime.velocity.setAll(0);continue;}
+        if(blocked){runtime.velocity.setAll(0);}
+        else {
         runtime.state.dx += delta.x; runtime.state.dz += delta.z;
         p.x = runtime.originX + runtime.state.dx; p.z = runtime.originZ + runtime.state.dz;
         p.mesh.position.x = p.x; p.mesh.position.z = p.z; p.mesh.rotation.y = runtime.state.yaw;
         runtime.velocity.scaleInPlace(Math.exp(-step * 3.2)); saved.set(p.id!, runtime.state);
+        }
       }
+      if(runtime.wobble===0&&runtime.velocity.lengthSquared()<=.0001&&!runtime.rotor&&!runtime.jet){p.mesh.rotation.z=0;for(const mesh of runtime.meshes)mesh.freezeWorldMatrix();animated.delete(runtime);}
     }
     for (let i = fragments.length - 1; i >= 0; i--) {
       const f = fragments[i]; f.life -= step;
@@ -187,21 +209,22 @@ export function createWorldInteractions(scene: Scene, shadow?: ShadowGenerator) 
       const points = [new Vector3(0, .6, 0), new Vector3(1, .7, 0), new Vector3(-1, .7, 0), new Vector3(0, .7, 1.5), new Vector3(0, 1.6, -.8)].map(offset => target.add(offset));
       const rays = points.map(point => { const delta = point.subtract(cameraPosition), distance = delta.length(); return new Ray(cameraPosition, delta.scale(1 / Math.max(.001, distance)), Math.max(0, distance - .5)); });
       const blockedGroups = new Set<string>();
-      for (const runtime of active.values()) {
+      for (const runtime of occluders) {
         const p = runtime.prop;
-        if (!p.active || !p.mesh.isEnabled() || (p.height ?? 0) < 2.4 || Math.hypot(p.x - target.x, p.z - target.z) > 95) continue;
-        p.mesh.computeWorldMatrix(true);
-        if (rays.some(ray => ray.intersectsMesh(p.mesh, false).hit)) { runtime.blockedUntil = clock + .22; if (runtime.group) blockedGroups.add(runtime.group); }
+        if (!p.active || !p.mesh.isEnabled() || (p.x-target.x)**2+(p.z-target.z)**2 > 95*95) continue;
+        p.mesh.computeWorldMatrix();
+        const bounds=p.mesh.getBoundingInfo().boundingBox;
+        if (rays.some(ray => ray.intersectsBoxMinMax(bounds.minimumWorld,bounds.maximumWorld)&&ray.intersectsMesh(p.mesh, true).hit)) { runtime.blockedUntil = clock + .22; fading.add(runtime);if (runtime.group) blockedGroups.add(runtime.group); }
       }
-      for (const runtime of active.values()) if (runtime.group && blockedGroups.has(runtime.group)) runtime.blockedUntil = clock + .22;
+      for(const group of blockedGroups)for(const runtime of groups.get(group)??[]){runtime.blockedUntil=clock+.22;fading.add(runtime);}
     }
     const factor = 1 - Math.exp(-Math.max(0, dt) * 8);
-    for (const runtime of active.values()) {
+    for (const runtime of fading) {
       const wanted = runtime.blockedUntil > clock ? .28 : 1;
       runtime.fade += (wanted - runtime.fade) * factor;
       if (Math.abs(runtime.fade - wanted) < .005) runtime.fade = wanted;
-      if (runtime.fade === 1 && !runtime.fadeMaterials.length) continue;
-      const meshes = [runtime.prop.mesh, ...runtime.prop.mesh.getChildMeshes()].filter(mesh => mesh instanceof Mesh) as Mesh[];
+      if(runtime.fade===1){runtime.meshes.forEach((mesh,i)=>mesh.material=runtime.originalMaterials[i]);for(const mat of runtime.fadeMaterials)mat.dispose();runtime.fadeMaterials.length=0;fading.delete(runtime);continue;}
+      const meshes = runtime.meshes;
       if (!runtime.fadeMaterials.length) {
         const clones = new Map<StandardMaterial, StandardMaterial>();
         for (const mesh of meshes) if (mesh.material instanceof StandardMaterial) {

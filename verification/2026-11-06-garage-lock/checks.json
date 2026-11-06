@@ -1,0 +1,14 @@
+{
+  "date": "2026-11-06",
+  "browser": "Chromium",
+  "isolatedSave": "garage-lock-20261106",
+  "checks": [
+    "Owned COMET has no lock",
+    "Unowned DUNE SCOUT displays a lock and purchase price of 1800",
+    "Buying DUNE SCOUT in the isolated test save immediately removes the lock",
+    "KESTREL displays the First Route challenge name and its 2000 metre requirement",
+    "Lock and arrows are hidden in the tuning tab",
+    "390 by 844 portrait layout fits without horizontal overflow"
+  ],
+  "screenshots": ["buy.png", "challenge.png", "mobile.png"]
+}

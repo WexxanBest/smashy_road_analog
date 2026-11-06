@@ -6,7 +6,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname, basename } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { NullEngine, Scene, StandardMaterial, Vector3 } from '@babylonjs/core';
+import { FreeCamera, MeshBuilder, NullEngine, Scene, StandardMaterial, Vector3 } from '@babylonjs/core';
 import ts from 'typescript';
 
 // Emit only the two world modules. Absolute Babylon URLs also resolve when the
@@ -31,7 +31,68 @@ for (const name of ['world', 'world-interactions']) {
   await writeFile(join(temporary, `${name}.mjs`), javascript);
 }
 const { createWorld } = await import(pathToFileURL(join(temporary, 'world.mjs')).href);
+const { meshesIntersectNow } = await import(pathToFileURL(join(temporary, 'world-interactions.mjs')).href);
 const near = (actual, expected, tolerance = 1e-7) => assert.ok(Math.abs(actual - expected) <= tolerance, `${actual} differs from ${expected} by more than ${tolerance}`);
+
+test('invisible moving colliders detect current prop contacts without a render update', () => {
+  const engine = new NullEngine(), scene = new Scene(engine);
+  try {
+    const camera = new FreeCamera('camera', new Vector3(0, 8, -10), scene);
+    camera.setTarget(Vector3.Zero());
+    const car = MeshBuilder.CreateBox('invisible-car-collider', { size: 2 }, scene);
+    car.isVisible = false;
+    car.computeWorldMatrix(true);
+    const prop = MeshBuilder.CreateBox('street-prop', { size: 2 }, scene);
+    prop.position.x = 20;
+    prop.freezeWorldMatrix();
+    scene.getActiveMeshCandidates = () => {
+      const data = scene.meshes.filter(mesh => mesh.isVisible && mesh.visibility > 0 && mesh.isEnabled());
+      return { data, length: data.length };
+    };
+    car.position.x = 20;
+    scene.render();
+    near(car.getBoundingInfo().boundingBox.centerWorld.x, 0);
+    assert.equal(meshesIntersectNow(car, prop), true, 'a hidden car collider must hit the prop at its new position');
+    prop.unfreezeWorldMatrix();
+    prop.position.x = car.position.x = 40;
+    assert.equal(meshesIntersectNow(car, prop), true, 'a pushed prop must also use its current bounds before rendering');
+    prop.position.x = 60;
+    assert.equal(meshesIntersectNow(car, prop), false, 'a moved-away prop must stop colliding immediately');
+  } finally { scene.dispose(); engine.dispose(); }
+});
+
+test('six biomes stream distinct scenery, preserve road clearance and release their resources', () => {
+  const engine = new NullEngine(), scene = new Scene(engine), world = createWorld(scene,42);
+  try {
+    const samples=[
+      [0,0,'city','building'],[-144,288,'desert','landmark-diner'],[0,-216,'fields','landmark-greenhouse'],
+      [900,0,'port','containers'],[1800,0,'forest','pine'],[2700,0,'snow','landmark-chalet'],
+    ];
+    for(const [x,z,biome,kind] of samples) {
+      assert.equal(world.biomeAt(x,z),biome);
+      for(let frame=0;frame<32;frame++)world.update(x,z,0);
+      const props=world.propsNear(x,z,230);
+      assert.ok(props.some(p=>p.kind===kind),`${biome} must have its own readable scenery`);
+      assert.equal(new Set(props.map(p=>p.id)).size,props.length,'streamed IDs must remain unique');
+      const expansion=props.filter(p=>p.kind?.startsWith('landmark-')||['pine','harbour-basin','containers','snow-peak'].includes(p.kind));
+      for(const prop of expansion){
+        const road=world.roadAt(prop.x,prop.z);
+        assert.ok(road.distance>road.width/2+prop.radius,`${prop.id} obstructs the road`);
+        const vertices=prop.mesh.getVerticesData('position');
+        assert.ok(vertices?.length&&Array.from(vertices).every(Number.isFinite),'landmark geometry must be finite');
+      }
+      assert.ok(scene.materials.length<=5,'additional scenery must reuse the world materials');
+      if(biome==='snow') {
+        const open=props.find(p=>p.kind==='snow-peak'||p.kind==='pine');
+        assert.ok(open);
+        assert.equal(world.surfaceAt(open.x,open.z),'snow');
+      }
+    }
+    world.dispose();
+    assert.equal(scene.meshes.length,0);
+    assert.equal(scene.transformNodes.length,0);
+  } finally {world.dispose();scene.dispose();engine.dispose();}
+});
 
 test('streamed world interactions preserve state, animate and release resources', async t => {
   const engine = new NullEngine(), scene = new Scene(engine), world = createWorld(scene, 42);
@@ -62,6 +123,7 @@ test('streamed world interactions preserve state, animate and release resources'
     assert.equal(building.active, true);
     assert.equal(building.mesh.isEnabled(), true);
     assert.equal(building.interaction, 'solid');
+    assert.equal(building.mesh.isWorldMatrixFrozen,true,'unchanged scenery must stay out of transform updates');
   });
 
   await t.test('facade damage, moved props and destroyed scenery survive actual chunk unload/reload', () => {
@@ -74,11 +136,14 @@ test('streamed world interactions preserve state, animate and release resources'
     const lampId = lamp.id;
     world.damageProp(facade, 10);
     world.damageProp(movable, 12, new Vector3(12, 0, 2));
+    assert.equal(movable.mesh.isWorldMatrixFrozen,false,'an impulse must wake a sleeping mesh');
     for (let frame = 0; frame < 120; frame++) world.update(0, 0, 1 / 60);
     const movedX = movable.x, movedZ = movable.z;
     assert.ok(movedX > startX + .05, 'a real impulse must change the prop position');
     near(movable.mesh.position.x, movedX);
     near(movable.mesh.position.z, movedZ);
+    for(let frame=0;frame<180;frame++)world.update(0,0,1/60);
+    assert.equal(movable.mesh.isWorldMatrixFrozen,true,'settled furniture must stop recomputing transforms');
     world.destroyProp(lamp);
     assert.equal(lamp.active, false);
     assert.ok(scene.meshes.some(mesh => mesh.name === `remains-${lampId}`), 'destruction must leave visible remains');
@@ -148,6 +213,8 @@ test('streamed world interactions preserve state, animate and release resources'
     }
     near(building.mesh.material.alpha, 1, .01);
     near(facade.mesh.material.alpha, 1, .01);
+    assert.ok(!building.mesh.material.name.includes('-fade-'),'occlusion must restore the shared material after recovery');
+    assert.ok(!scene.materials.some(material=>material.name.includes('-fade-')),'recovered occlusion clones must not accumulate');
   });
 
   await t.test('a small countryside structure can collapse completely', () => {
@@ -197,4 +264,52 @@ test('streamed world interactions preserve state, animate and release resources'
     assert.equal(scene.meshes.length, 0);
     assert.equal(world.propsNear(0, 0, 1000).length, 0);
   });
+});
+
+test('port water exposes bounded patrol space and scenery remains in small static batches',()=>{
+  const engine=new NullEngine(),scene=new Scene(engine),world=createWorld(scene,42);
+  try{
+    for(let i=0;i<32;i++)world.update(900,0,0);
+    const basins=world.propsNear(900,0,230).filter(p=>p.kind==='harbour-basin');
+    assert.ok(basins.length>0);
+    for(const basin of basins){const water=basin.mesh.metadata.waterBounds;assert.equal(water.centerX,basin.x);assert.equal(water.centerZ,basin.z);assert.ok(water.halfWidth<basin.width/2&&water.halfDepth<basin.depth/2);}
+    const kits=scene.meshes.filter(mesh=>mesh.name.startsWith('scenery-'));
+    assert.ok(kits.length>0,'port surroundings must include the additional service/construction kits');
+    for(const mesh of kits){assert.equal(mesh.getChildMeshes().length,0,'a kit must be one shared-material batch');assert.equal(mesh.isWorldMatrixFrozen,true);}
+    assert.equal(scene.materials.length,5);
+  }finally{world.dispose();scene.dispose();engine.dispose();}
+});
+
+test('solid cargo and scenery barriers collide while service bays and bridge crossings stay open', () => {
+  const engine = new NullEngine(), scene = new Scene(engine), world = createWorld(scene, 42);
+  try {
+    const load = (x, z) => { for (let i = 0; i < 32; i++) world.update(x, z, 0); return world.propsNear(x, z, 230); };
+    const solidKinds = new Set();
+    const verify = (props, id, contactPoints, openPoints) => {
+      const blockers = props.filter(p => p.id.startsWith(id + '-') && p.kind.startsWith('kit-'));
+      assert.ok(blockers.length, `missing blockers for ${id}`);
+      const blocked = (x, z) => blockers.some(p => Math.abs(x-p.x) < p.width/2 + .8 && Math.abs(z-p.z) < p.depth/2 + .8);
+      for (const [x, z] of contactPoints) assert.ok(blocked(x, z), `${id}: solid object at ${x},${z} needs contact`);
+      for (const [x, z] of openPoints) assert.equal(blocked(x, z), false, `${id}: drive-through at ${x},${z} must stay open`);
+      for (const p of blockers) { assert.equal(p.breakable, false); assert.equal(p.interaction, 'solid'); }
+    };
+    let props = load(0, 0);
+    verify(props, '0:0-lot--76:-76', [[-79,-79]], [[-76,-81]]);
+    for (const p of props.filter(p => p.kind === 'ramp')) {
+      solidKinds.add(p.kind); assert.equal(p.breakable, false); assert.equal(p.interaction, 'solid');
+    }
+    props = load(900, 0);
+    for (const p of props.filter(p => p.kind === 'containers')) {
+      solidKinds.add(p.kind); assert.equal(p.breakable, false, 'solid cargo must be eligible for a physics proxy');
+      assert.equal(p.interaction, 'solid');
+    }
+    assert.deepEqual([...solidKinds].sort(), ['containers', 'ramp']);
+    props = load(-144, 288);
+    verify(props, '-4:2-kit', [[-270,159.3],[-270,164.7]], [[-278,162],[-270,162],[-262,162]]);
+    props = load(400, 650);
+    verify(props, '4:7-kit', [[270,483.3],[270,488.7]], [[260,486],[270,486],[280,486]]);
+    verify(props, '6:7-kit', [[450,526.8],[450,524]], [[450,518]]);
+    verify(props, '5:8-kit', [[378,599],[378,597.6],[378,600.4]], [[378,594]]);
+    verify(props, '6:9-kit', [[411,663],[417,663]], [[414,660]]);
+  } finally { world.dispose(); scene.dispose(); engine.dispose(); }
 });

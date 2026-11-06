@@ -44,6 +44,36 @@ test('fresh save and its first persisted reload start without a turret', () => {
   }
 });
 
+test('expanded garage preserves purchases, paint, equipment and upgrades after reload', () => {
+  const save=normalizeSave(defaultSave());
+  for(const id of ['metro','pulse','nomad']) {
+    const car=types.CARS.find(car=>car.id===id);
+    assert.ok(car && car.price>0 && !car.challengeId, `${id} must be purchasable`);
+    save.owned.push(id);save.colors[id]='#568fb6';save.upgrades[id]={engine:2,armor:1,tires:1,handling:3,nitro:0};save.turretEquipped[id]=true;
+  }
+  save.turretOwned=true;save.selected='nomad';
+  assert.deepEqual(normalizeSave(JSON.parse(JSON.stringify(save))),save);
+  assert.equal(new Set(types.CARS.map(car=>car.id)).size,types.CARS.length);
+});
+
+test('expanded police fleet preserves pursuit roles with a lighter motorcycle tradeoff', () => {
+  const ids=new Set();
+  for(const role of ['patrol','interceptor','suv','swat'])for(let index=0;index<12;index++) {
+    const base=policeSpec(role),car=policeSpec(role,index);ids.add(car.id);
+    assert.equal(car.policeRole,role);
+    if(car.visualVariant==='motorcycle'){
+      assert.equal(role,'patrol');assert.ok(car.armor<base.armor&&car.mass<base.mass*.5,'motorcycle must lose protection and ramming weight');
+      assert.ok(car.speed>base.speed&&car.handling>=base.handling,'motorcycle trades protection for agility');
+      assert.ok(car.width<1.1&&car.length<3);
+    }else{
+      for(const key of ['armor','speed','mass','handling'])assert.equal(car[key],base[key]);
+      assert.ok(car.width>1.7&&car.width<2.6&&car.length<6);
+    }
+  }
+  assert.equal(ids.size,9);
+  assert.deepEqual(policeSpec('swat',Infinity),policeSpec('swat',0));
+});
+
 test('legacy progress keeps the built-in turret and adds finite handling upgrades', () => {
   const legacy = { credits: 1742, selected: 'brute', owned: ['comet', 'rally', 'brute'], colors: { rally: '#ef8155' }, upgrades: { brute: { engine: 2, armor: 1, tires: 3, nitro: 2 } }, best: 91, music: false };
   const save = normalizeSave(legacy);

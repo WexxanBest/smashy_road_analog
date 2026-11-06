@@ -32,6 +32,17 @@ const unitBox = VertexData.CreateBox({ size: 1 });
 const unitPanel = VertexData.CreatePlane({ size: 1 });
 const unitCrown = VertexData.CreateIcoSphere({ radius: 0.5, subdivisions: 1, flat: true });
 const unitCylinders = new Map<number, VertexData>();
+// Four flat roof faces, six triangles; shared by all pitched rural roofs.
+const unitRoof = new VertexData();
+unitRoof.positions = [
+  -.5,-.5,-.5, 0,.5,-.5, .5,-.5,-.5,
+  .5,-.5,.5, 0,.5,.5, -.5,-.5,.5,
+  -.5,-.5,.5, 0,.5,.5, 0,.5,-.5, -.5,-.5,-.5,
+  .5,-.5,-.5, 0,.5,-.5, 0,.5,.5, .5,-.5,.5,
+];
+unitRoof.indices = [0,2,1, 3,5,4, 6,8,7,6,9,8, 10,12,11,10,13,12];
+unitRoof.normals = [];
+VertexData.ComputeNormals(unitRoof.positions, unitRoof.indices, unitRoof.normals);
 
 function hash(x: number, z: number, seed: number): number {
   let n = Math.imul(x, 374761393) ^ Math.imul(z, 668265263) ^ Math.imul(seed, 1442695041);
@@ -64,6 +75,8 @@ export function createWorld(scene: Scene, seed: number): World {
   let trafficMarkingSide: 'right'|'left' = 'right';
   const arrowRanges = new WeakMap<Mesh,ArrowRange[]>();
   let disposed = false;
+  let streamX=NaN,streamZ=NaN;
+  let pendingChunks:{cx:number;cz:number;distance:number}[]=[];
   const shadow = (scene.metadata as { shadowGenerator?: ShadowGenerator } | null)?.shadowGenerator;
   const interactions = createWorldInteractions(scene, shadow);
   const garages: GarageSite[] = [];
@@ -104,7 +117,7 @@ export function createWorld(scene: Scene, seed: number): World {
     if (!value) {
       let x = ix * NS_GAP, z = iz * EW_GAP;
       for (let i = 0; i < 6; i++) { x = rawCurve(0, ix, z).value; z = rawCurve(1, iz, x).value; }
-      value = { x, z, id: key, enabled: key === '0:0' || hash(ix, iz, seed + 7321) < 0.58 };
+      value = { x, z, id: key, enabled: key === '0:0' || regionalBiome(x,z)!=='forest'&&hash(ix, iz, seed + 7321) < 0.58 };
       districts.set(key, value);
       if (districts.size > 128) districts.delete(districts.keys().next().value!);
     }
@@ -126,7 +139,22 @@ export function createWorld(scene: Scene, seed: number): World {
     const d = district(Math.round(x / NS_GAP), Math.round(z / EW_GAP));
     return d.enabled && Math.abs(x - d.x) < 156 && Math.abs(z - d.z) < 146 ? d : undefined;
   }
+  function regionalBiome(x:number,z:number):'port'|'forest'|'snow'|undefined {
+    // Large coherent regions, with gently displaced boundaries. Keep the first
+    // neighbourhood and its saved landmarks intact for existing players.
+    if (Math.hypot(x,z)>450) {
+      const rx=Math.floor((x+450+Math.sin(z/320)*55)/900);
+      const rz=Math.floor((z+450+Math.sin(x/370)*55)/900);
+      const region=((rx+rz*2)%6+6)%6;
+      if(region===1)return 'port';
+      if(region===2)return 'forest';
+      if(region===3)return 'snow';
+    }
+    return undefined;
+  }
   function biomeAt(x: number, z: number): Biome {
+    const region=regionalBiome(x,z);
+    if(region)return region;
     const d = nearbyDistrict(x, z);
     if (d && Math.max(Math.abs(x - d.x) / 136, Math.abs(z - d.z) / 128) < 1 + 0.06 * Math.sin((x + z) / 29)) return 'city';
     const humidity = Math.sin((x + climate) / 410) + 0.75 * Math.sin((z - climate) / 360) + 0.45 * Math.sin((x + z) / 180);
@@ -279,7 +307,8 @@ export function createWorld(scene: Scene, seed: number): World {
     }
     const cx = Math.round(x / CHUNK), cz = Math.round(z / CHUNK);
     for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) if (soilPatches.get((cx + dx) + ':' + (cz + dz))?.some(p => containsPolygon(p, x, z))) return 'dirt';
-    return biomeAt(x, z) === 'desert' ? 'sand' : 'grass';
+    const biome=biomeAt(x,z);
+    return biome==='snow'?'snow':biome==='port'?'asphalt':biome==='desert'?'sand':'grass';
   }
   function ensureGarages(x: number, z: number): void {
     if (!garages.some(g => g.id === 'origin')) {
@@ -319,6 +348,9 @@ export function createWorld(scene: Scene, seed: number): World {
   }
   function crown(list: Part[], x:number,y:number,z:number,w:number,h:number,d:number,hex:string,rotation=0):void {
     list.push({primitive:unitCrown,x,y,z,width:w,height:h,depth:d,color:color(hex),rotation:{x:0,y:rotation,z:0}});
+  }
+  function pitchedRoof(list: Part[], x:number,y:number,z:number,w:number,h:number,d:number,hex:string):void {
+    list.push({primitive:unitRoof,x,y,z,width:w,height:h,depth:d,color:color(hex),rotation:{x:0,y:0,z:0}});
   }
   function planter(list:Part[],x:number,z:number,width=1.7,depth=1.4,rotation=0):void {
     box(list,x,.3,z,width,.5,depth,'#aa9774',rotation);
@@ -450,10 +482,12 @@ export function createWorld(scene: Scene, seed: number): World {
       mesh.setEnabled(false);
     } else {
       mesh.receiveShadows = true;
-      shadow?.addShadowCaster(mesh);
     }
     const prop: WorldProp = { x, z, radius, mesh, breakable, hp, active: true };
     interactions.register(prop, id, options, !!visual);
+    // Tiny furniture and flat signs add draw calls to every shadow pass without
+    // a readable silhouette. Buildings, trees and substantial props still cast.
+    if(visual&&(prop.height??0)>2.4&&options.interaction!=='facade')shadow?.addShadowCaster(mesh,false);
     list.push(prop);
     return prop;
   }
@@ -462,8 +496,11 @@ export function createWorld(scene: Scene, seed: number): World {
     const height = (5 + r() * 2.2) * scale;
     box(meshes, x, height * 0.27, z, .45, height * .54, .45, '#796c52');
     box(meshes,x,.14,z,1.65,.28,1.65,'#a59e80');box(meshes,x,.295,z,1.32,.035,1.32,'#728764');
-    crown(meshes,x,height*.71,z,height*.72,height*.67,height*.68,autumn?'#b8ae5e':'#6b874a',r()*2);
-    crown(meshes,x+.48,height*.88,z+.25,height*.45,height*.44,height*.48,autumn?'#c2b76c':'#8fa75c',r()*2);
+    const shape = Math.floor(hash(Math.round(x),Math.round(z),seed+617)*3);
+    const lower = shape === 1 ? [.43,.78,.43] : shape === 2 ? [.9,.43,.78] : [.72,.67,.68];
+    const upper = shape === 1 ? [.3,.45,.3] : shape === 2 ? [.57,.32,.57] : [.45,.44,.48];
+    crown(meshes,x,height*.71,z,height*lower[0],height*lower[1],height*lower[2],autumn?'#b8ae5e':shape===1?'#5b7e58':'#6b874a',r()*2);
+    crown(meshes,x+(shape===1?.1:.48),height*.88,z+.25,height*upper[0],height*upper[1],height*upper[2],autumn?'#c2b76c':'#8fa75c',r()*2);
     collision(props, id, x, z, 0.65, merge(meshes, 'tree'), true, 70, { kind: 'tree', height, mass: 260 });
   }
   function fence(props: WorldProp[], id: string, x: number, z: number, length: number, alongZ = false): void {
@@ -522,7 +559,10 @@ export function createWorld(scene: Scene, seed: number): World {
         box(meshes,x+side*(w/2+.06),y-1.08,z,.16,.15,d+.25,'#dfd3b7');
       }
     }
-    for(const offset of[-1,1]) {
+    // Change the skyline by replacing roof kits, keeping the same material and
+    // building batch. The independent hash leaves the gameplay RNG untouched.
+    const roofKind = Math.floor(hash(Math.round(x), Math.round(z), seed + 741) * 3);
+    if (roofKind === 0) for(const offset of[-1,1]) {
       const vx=x+offset*w*.24,vz=z+d*.16;
       box(meshes,vx,h+1.02,vz,3.5,1.45,2.9,'#a6aaa0');
       box(meshes,vx,h+1.78,vz,3.7,.13,3.08,'#c2c1ae');
@@ -532,7 +572,29 @@ export function createWorld(scene: Scene, seed: number): World {
       cylinder(meshes,x+offset*w*.32,h+1.1,z-d*.28,.9,1.7,'#9d9e8d',.9,6);
       cylinder(meshes,x+offset*w*.32,h+2.02,z-d*.28,1.3,.15,'#d2c7ad',1.3,6);
     }
-    box(meshes,x,h+.72,z-1.4,w*.5,.64,1.1,'#a8ad9f');
+    if (roofKind === 0) box(meshes,x,h+.72,z-1.4,w*.5,.64,1.1,'#a8ad9f');
+    else if (roofKind === 1) {
+      // Low water tank, service hatch and ventilation ducts on an older block.
+      const tx=x-w*.22,tz=z+d*.18;
+      box(meshes,tx,h+.58,tz,4.1,.45,4.1,'#7c8177');
+      cylinder(meshes,tx,h+1.28,tz,3.4,1.05,'#8d9e92',3.4,8);
+      cylinder(meshes,tx,h+1.85,tz,3.6,.12,'#c1bca6',3.6,8);
+      for(const side of[-1,1])box(meshes,tx+side*1.66,h+1.28,tz,.08,1.05,1.6,'#b8b7a1');
+      box(meshes,x+w*.2,h+.75,z-d*.14,3.4,.9,3,'#b1aa90');
+      box(meshes,x+w*.2,h+1.25,z-d*.14,3.65,.15,3.2,'#758476');
+      box(meshes,x,h+.55,z+d*.18,w*.45,.35,.5,'#a1a99c');
+      for(const offset of[-1,1]) cylinder(meshes,x+offset*w*.3,h+.85,z-d*.32,.6,1.15,'#9a9d8e',.6,6);
+    } else {
+      // Sawtooth workshop skylights read from the driving camera without glass effects.
+      for(const offset of[-1,1]) {
+        const sx=x+offset*w*.24;
+        box(meshes,sx,h+.48,z,4.9,.3,d*.63,'#777f72');
+        pitchedRoof(meshes,sx,h+1.18,z,4.7,1.1,d*.61,'#75948c');
+        for(const end of[-1,1])box(meshes,sx,h+.72,z+end*d*.3,4.9,.14,.15,'#d1c6aa');
+        box(meshes,sx,h+1.76,z,.13,.12,d*.64,'#c8bfa8');
+      }
+      box(meshes,x,h+.8,z+d*.36,2.1,1.05,1.8,'#a5aa97');
+    }
     const awningColor=r()>.5?'#a85843':'#3c7060';
     const awning=(px:number,pz:number,width:number,rotation:number,label:string)=>{
       const canopy: Part[] = [];
@@ -824,8 +886,21 @@ export function createWorld(scene: Scene, seed: number): World {
       const points = [{ x: x + dx, z: z + dz }, { x: x + dx + 18, z: z + dz }, { x: x + dx + 18, z: z + dz + 18 }, { x: x + dx, z: z + dz + 18 }];
       const biome = biomeAt(x + dx + 9, z + dz + 9);
       const variant = hash(Math.floor((x + dx) / 18), Math.floor((z + dz) / 18), seed + 18);
-      const hex = biome === 'city' ? '#98ad86' : biome === 'desert' ? (variant < 0.5 ? '#d2b083' : '#cdb084') : (variant < 0.5 ? '#94a975' : '#91a572');
+      const hex = biome==='port'?(variant<.5?'#a9aea1':'#a5aa9c'):biome==='forest'?(variant<.5?'#718b62':'#789266'):biome==='snow'?(variant<.5?'#e2e6de':'#dbe1da'):biome === 'city' ? '#98ad86' : biome === 'desert' ? (variant < 0.5 ? '#d2b083' : '#cdb084') : (variant < 0.5 ? '#94a975' : '#91a572');
       polygon(meshes, points, -0.2, hex, points.map(p => groundHeight(p.x, p.z)));
+    }
+    const biome=biomeAt(x,z);
+    if(biome==='city'||biome==='port'||biome==='snow')return;
+    const offset=hash(Math.round(x),Math.round(z),seed+618);
+    const px=x-20+offset*32,pz=z-14+hash(Math.round(x),Math.round(z),seed+619)*28;
+    if(!clearSpace(px,pz,6))return;
+    // One five-sided patch and a pair of low tufts: five triangles per rural
+    // chunk, baked into its existing batch, with no new collider or update work.
+    const points=[{x:px-5,z:pz-1},{x:px-2,z:pz-2.5},{x:px+5,z:pz-.5},{x:px+3,z:pz+2},{x:px-4,z:pz+1.5}];
+    polygon(meshes,points,-.2,biome==='desert'?'#bda07c':'#a6ae79',points.map(p=>groundHeight(p.x,p.z)+.012));
+    for(const side of[-1,1]) {
+      const tx=px+side*2.5,tz=pz+.2,y=groundHeight(tx,tz)+.025;
+      polygon(meshes,[{x:tx-.35,z:tz},{x:tx,z:tz+.04},{x:tx+.35,z:tz}],y,biome==='desert'?'#8c9470':'#7c975e',[y,y+.6,y]);
     }
   }
   function owned(px: number, pz: number, cx: number, cz: number): boolean { return Math.round(px / CHUNK) === cx && Math.round(pz / CHUNK) === cz; }
@@ -943,11 +1018,263 @@ export function createWorld(scene: Scene, seed: number): World {
         const px = gx + c * sign * 2.7, pz = gz - s * sign * 2.7;
         const pump:Part[]=[];
         box(pump, px, 1, pz, 0.85, 2, 0.7, '#c38569', site.rotation);
-        box(pump,px,1.35,pz-.37,.5,.35,.04,'#314d44',site.rotation);
+        const pumpSite={x:px,z:pz,rotation:site.rotation};
+        for(const [u,y,v,w,h,d,paint] of [[0,.08,0,1.1,.16,.9,'#a49a80'],[0,1.9,0,.88,.3,.74,'#e1d4b5'],[0,1.35,-.37,.5,.35,.04,'#314d44'],[.55,.9,0,.12,1.4,.12,'#34483e'],[.45,.25,0,.3,.12,.12,'#34483e'],[.46,1.6,0,.25,.22,.16,'#d4be8e']]as const){const p=localPoint(pumpSite,u,v);box(pump,p.x,y,p.z,w,h,d,paint,site.rotation);}
         collision(props, 'pump-' + site.id + sign, px, pz, 0.5,merge(pump,'fuel-pump'),true,85,{kind:'fuel-pump',interaction:'explosive',height:2,mass:250});
         cylinder(meshes, px, 2, pz + 1.5, 0.17, 4, '#d6ceb2', 0.17);
       }
     }
+  }
+
+  // Scenery kits use the existing vertex-colour material. A whole landmark is
+  // one draw batch; individual tiny details never acquire physics bodies.
+  type Landmark = 'warehouse'|'diner'|'motel'|'greenhouse'|'silos'|'market'|'sawmill'|'cabin'|'lookout'|'chalet'|'lift'|'water-tower'|'solar';
+  function landmark(props:WorldProp[],id:string,x:number,z:number,kind:Landmark):void {
+    const parts:Part[]=[];
+    const b=(u:number,y:number,v:number,w:number,h:number,d:number,hex:string)=>box(parts,x+u,y,z+v,w,h,d,hex);
+    const c=(u:number,y:number,v:number,d:number,h:number,hex:string,top=d,sides=8)=>cylinder(parts,x+u,y,z+v,d,h,hex,top,sides);
+    const roof=(y:number,w:number,h:number,d:number,hex:string)=>pitchedRoof(parts,x,y,z,w,h,d,hex);
+    let width=12,depth=9,height=5,hp=700;
+    const window=(u:number,y:number,v:number,w=1.7,h=1.4)=>{b(u,y,v,w+.2,h+.2,.12,'#ded5ba');b(u,y,v-.08,w,h,.08,'#415e60');b(u,y,v-.14,.08,h,.04,'#c3cabb');};
+    if(kind==='warehouse'||kind==='sawmill') {
+      width=22;depth=15;height=8;
+      b(0,3,0,22,6,15,kind==='warehouse'?'#a4b4a7':'#977456');
+      roof(6.9,23,1.8,16,kind==='warehouse'?'#536a65':'#afb29a');
+      for(const u of[-7,0,7]){b(u,2,-7.55,4.4,4,.12,'#416960');b(u,4.45,-7.6,4.8,.65,.16,'#d9cbb0');for(let row=0;row<5;row++)b(u,.55+row*.65,-7.64,4.3,.06,.06,'#718a7a');}
+      for(const u of[-10.5,-3.5,3.5,10.5])b(u,3,-7.75,.25,6,.24,'#d9cdb1');
+      for(const u of[-6,6]){b(u,7.75,0,3,.25,8,'#759a98');b(u,7.92,0,.1,.1,8,'#d4d9c5');}
+      b(0,.2,-8.5,22,.4,2,'#8f998b');
+    } else if(kind==='diner'||kind==='motel') {
+      width=kind==='motel'?19:13;depth=9;height=4.8;
+      b(0,1.9,0,width,3.8,9,'#d1ba95');b(0,3.9,0,width+.7,.25,9.8,'#e2d9be');b(0,3.65,0,width+.9,.22,10,'#b55e44');
+      if(kind==='motel')for(const u of[-7,-2.3,2.3,7]){b(u,1.1,-4.58,1.4,2.2,.12,'#50766e');window(u+1.6,1.9,-4.6,1.2,1.1);}
+      else for(const u of[-4,0,4])window(u,1.9,-4.6,3,1.9);
+      b(0,3.2,-5.1,width,.16,1.5,'#b55e44');for(let u=-width/2+.5;u<width/2;u+=1.4)b(u,3.3,-5.1,.65,.08,1.6,'#e9dcb9');
+      b(-width/2+1,5,-3,.18,3,.18,'#5a7368');b(-width/2+1,6.5,-3,3.3,1.6,.3,'#47766e');
+      lettering(parts,kind==='motel'?'MOTEL':'CAFE',x-width/2+1,6.5,z-3.17,.08,'#f0dfae');height=7.3;
+      b(3,4.3,1,2.4,.7,2,'#84938b');
+    } else if(kind==='greenhouse') {
+      width=12;depth=18;height=5;
+      b(0,.2,0,12,.4,18,'#8b9c82');b(0,1.7,0,11.6,2.8,17.6,'#92b8ac');roof(3.75,11.8,2,17.8,'#a7c9b7');
+      for(let v=-8.5;v<=8.5;v+=3.4){b(-5.9,1.8,v,.12,3.2,.12,'#d7d6b9');b(5.9,1.8,v,.12,3.2,.12,'#d7d6b9');for(const side of[-1,1]){const beam=b(side*2.9,3.7,v,6.2,.1,.1,'#d7d6b9');beam.rotation.z=-side*.32;}}
+      for(const side of[-1,1])b(side*5.9,2.7,0,.1,.12,18,'#d7d6b9');b(0,1.4,-9.04,2,2.8,.15,'#526e66');
+    } else if(kind==='silos') {
+      width=13;depth=9;height=11;hp=1800;
+      for(const u of[-4.2,0,4.2]){c(u,4.6,0,3.5,9,'#b3b8a7');c(u,9.5,0,3.5,1.2,'#d3d2b9',0);for(const y of[1,4,7])c(u,y,0,3.6,.12,'#8f9e91');}
+      b(0,10,0,9,.35,.5,'#788b7e');b(0,5.5,2.1,.25,11,.25,'#788b7e');for(let y=1;y<10;y+=.65)b(0,y,2.28,.8,.08,.1,'#586e65');
+    } else if(kind==='market') {
+      width=10;depth=7;height=4;
+      for(const u of[-4.3,4.3])for(const v of[-2.5,2.5])b(u,1.8,v,.18,3.6,.18,'#8e7854');
+      for(let u=-4.5;u<5;u++)b(u,3.65,0,1,.15,6.2,Math.round(u+.5)%2?'#547f71':'#eadcb8');
+      b(0,1,-1.8,9,1.8,1.5,'#9f8254');
+      for(let u=-3.6;u<4;u+=1.8){b(u,2,-1.8,1.5,.35,1.3,'#c6a778');for(const n of[-.38,.38])b(u+n,2.3,-1.8,.6,.35,.7,u<0?'#bb6341':'#a2b65c');}
+      b(0,.14,0,10,.25,7,'#c0b18b');
+    } else if(kind==='cabin'||kind==='chalet') {
+      width=kind==='chalet'?13:9;depth=10;height=kind==='chalet'?8:6;
+      b(0,1.3,0,width,2.6,10,'#cdc7b1');b(0,kind==='chalet'?4:2.9,0,width,kind==='chalet'?3:1.8,10,'#8e7056');
+      roof(height-1.2,width+1.5,2.8,12,kind==='chalet'?'#e1e6dd':'#627c69');
+      for(const u of[-width*.3,width*.3])window(u,2,-5.1,1.7,1.7);
+      b(0,1.2,-5.15,1.5,2.4,.15,'#526b5c');
+      b(0,.35,-6.25,width+1,.5,2.5,'#a18e6f');
+      if(kind==='chalet'){b(0,3.3,-6,width+1,.2,2.3,'#8b765e');for(let u=-width/2;u<=width/2;u+=1.3)b(u,3.9,-7,.12,1.2,.12,'#785f49');b(0,4.5,-7,width+1,.1,.16,'#785f49');for(const u of[-4,0,4])window(u,4.6,-5.1);}
+      b(width*.28,height-1,-1,1.1,3,1.2,'#9c9686');
+    } else if(kind==='lookout'||kind==='water-tower') {
+      width=7;depth=7;height=12;hp=900;
+      for(const u of[-2.5,2.5])for(const v of[-2.5,2.5])b(u,4,v,.3,8,.3,'#786e53');
+      for(const side of[-1,1])for(const y of[2,5]){const beam=b(0,y,side*2.5,5.7,.2,.2,'#8b7f61');beam.rotation.z=side*.55;}
+      if(kind==='water-tower'){c(0,9,0,6,4,'#c4a15d');c(0,11.4,0,6.4,1,'#dfbd75',0);c(0,7.3,0,6.1,.2,'#6b7362');}
+      else {b(0,9,0,6,3,6,'#a28a60');roof(11.2,7.2,1.6,7.2,'#4e7868');for(const u of[-1.6,1.6])window(u,9.3,-3.06,2.2,1.5);b(0,7.6,0,7,.25,7,'#8e795a');}
+      b(2.85,4.8,-2.7,.12,9.6,.12,'#6b735f');b(3.65,4.8,-2.7,.12,9.6,.12,'#6b735f');for(let y=.5;y<9.5;y+=.65)b(3.25,y,-2.7,.85,.1,.15,'#6b735f');
+    } else if(kind==='lift') {
+      width=17;depth=12;height=10;
+      b(0,2,0,17,4,12,'#a6b0a2');roof(5.2,18,2.4,13,'#637b75');
+      for(const u of[-5,5]){b(u,6,0,.45,10,.45,'#697f75');b(u,10.8,0,4,.3,3,'#879b8c');}
+      b(0,9.7,0,12,.12,.12,'#425950');
+      for(const u of[-3,3]){b(u,8.6,0,.12,2,.12,'#536961');b(u,7.6,0,2,1.9,1.8,'#bf684e');b(u,7.9,-.93,1.7,.9,.08,'#3f6468');}
+      window(0,2.2,-6.1,6,2);
+    } else {
+      width=17;depth=13;height=2.5;hp=500;
+      for(const u of[-6,0,6])for(const v of[-4,4]){b(u,.8,v,.2,1.6,.2,'#839488');const solar=b(u,1.7,v,5,.15,4.7,'#486f81');solar.rotation.x=.28;for(const n of[-1.6,0,1.6])b(u+n,1.8,v,.06,.06,4.7,'#b4c6bb');}
+    }
+    collision(props,id,x,z,Math.max(width,depth)*.48,merge(parts,'landmark-'+kind),kind==='market'||kind==='cabin'||kind==='greenhouse',hp,{kind:'landmark-'+kind,interaction:kind==='market'||kind==='cabin'||kind==='greenhouse'?'breakable':'solid',width,depth,height,mass:kind==='market'?350:8000});
+  }
+  type DetailKind='bus-stop'|'charger'|'logs'|'containers'|'snow-fence'|'radio'|'dumpsters'|'construction-gate'|'ramp'|'market-stall'|'pallets';
+  function detailProp(props:WorldProp[],id:string,x:number,z:number,kind:DetailKind):void {
+    const parts:Part[]=[];
+    const b=(u:number,y:number,v:number,w:number,h:number,d:number,hex:string)=>box(parts,x+u,y,z+v,w,h,d,hex);
+    let width=3,depth=2,height=2.6;
+    if(kind==='bus-stop') {
+      width=5.5;depth=2.6;height=3.3;
+      for(const u of[-2.5,2.5])b(u,1.6,.8,.16,3.2,.16,'#3f7169');b(0,3.2,0,5.8,.22,2.8,'#e2d8b6');b(0,1.8,1,5,2.4,.1,'#506c6c');b(0,.65,.3,4.6,.15,.6,'#b89b6c');b(2.7,2,-.6,.15,3.8,.15,'#6b8272');b(2.7,3,-.6,.9,1.3,.15,'#426f68');
+    } else if(kind==='charger') {
+      width=1;depth=1; b(0,.1,0,1,.2,1,'#929b89');b(0,1.3,0,.7,2.4,.65,'#39857c');b(0,2.45,0,.8,.25,.7,'#d5b357');b(0,1.9,-.35,.47,.65,.06,'#294c4b');b(.47,1.3,0,.12,1.4,.13,'#344c42');b(.39,.64,0,.25,.12,.13,'#344c42');b(.4,1.9,0,.2,.25,.18,'#dcc47a');
+    } else if(kind==='logs') {
+      width=5.8;depth=3.4;height=2;
+      for(let row=0;row<3;row++)for(let i=0;i<3-row;i++){const p=cylinder(parts,x, .55+row*.8,z-1+i*.9+row*.45,.9,5.8,'#8d6a47',.9,7);p.rotation.z=Math.PI/2;const end=cylinder(parts,x-2.94,.55+row*.8,z-1+i*.9+row*.45,.76,.025,'#c7a36e',.76,7);end.rotation.z=Math.PI/2;}
+      for(const u of[-1.8,1.8])b(u,1,0,.12,1.8,3,'#525d4d');
+      for(const v of[-1,1])b(0,.16,v,6.1,.25,.3,'#625844');height=2.6;
+    } else if(kind==='containers') {
+      width=11;depth=6;height=5.5;
+      const palette=['#b66d4e','#4d8587','#6f9271'];
+      for(let n=0;n<3;n++){const u=n===2?0:(n===0?-2.7:2.7),y=n===2?4:1.35; b(u,y,0,5.2,2.6,5.6,palette[n]);for(let i=-2;i<=2;i++)b(u+i*.9,y,-2.84,.08,2.4,.06,'#c5bda1');for(const side of[-1,1])b(u+side*1.1,y,-2.9,.08,2.2,.08,'#d6cfb1');}
+    } else if(kind==='snow-fence') {
+      width=10;depth=.4;height=2.7;for(const u of[-4.8,0,4.8])b(u,1.3,0,.2,2.6,.25,'#8b7359');for(let y=.4;y<2.6;y+=.45)b(0,y,0,10,.14,.16,'#a18b6e');
+    } else if(kind==='dumpsters') {
+      width=4.8;depth=2;height=2;
+      for(const u of[-1.3,1.3]){const paint=u<0?'#59856a':'#c6a654';b(u,1,0,2,1.5,1.6,paint);b(u,1.82,0,2.15,.22,1.75,'#465e4b');b(u,1.4,-.86,.9,.13,.12,'#d1c7a5');for(const dx of[-.65,.65]){b(u+dx,.2,0,.28,.4,1.5,'#34443c');b(u+dx,1,-.82,.08,1.2,.05,'#a7af87');}}
+    } else if(kind==='construction-gate') {
+      width=5.5;depth=1.2;height=2.2;
+      b(-2.3,.85,0,.8,1.7,1,'#caab51');b(-2.3,.12,0,1.2,.24,1.4,'#66796b');b(.1,1.5,0,5,.35,.2,'#e6dbc0');for(let u=-2;u<2.5;u+=1)b(u,1.5,-.12,.45,.35,.04,'#ba6347');for(const u of[-2.3,2.3])b(u,1.85,0,.32,.3,.32,'#dfae4c');
+    } else if(kind==='ramp') {
+      width=4;depth=6;height=1.25;
+      const ramp=b(0,.65,0,4,.18,6.1,'#637f84');ramp.rotation.x=-.2;
+      for(const u of[-1.9,1.9]){const edge=b(u,.77,0,.18,.2,6.1,'#d6b85d');edge.rotation.x=-.2;b(u,.6,2.4,.2,1.2,.25,'#4c625e');}
+      for(const v of[-2,2])b(0,.13,v,4.2,.2,.3,'#4c625e');
+    } else if(kind==='market-stall') {
+      width=4.5;depth=3.5;height=3.2;
+      for(const u of[-2,2])b(u,1.6,0,.14,3.2,.14,'#92754f');for(let u=-2;u<=2;u++)b(u,3.15,0,1,.14,3.5,u%2?'#517e87':'#e2d6b6');b(0,.75,-.5,4,1.5,1.2,'#aa8960');for(const u of[-1.3,0,1.3]){b(u,1.7,-.5,1.1,.4,1,'#bca373');b(u,1.95,-.5,.8,.2,.7,u===0?'#cb7b51':'#91a85f');}b(2.1,1,-.5,.7,.1,1.4,'#8f7955');
+    } else if(kind==='pallets') {
+      width=4;depth=3;height=2.4;
+      for(const u of[-1,1]){for(const v of[-.8,0,.8])b(u,.13,v,1.8,.25,.25,'#8a7453');b(u,.32,0,1.9,.12,2,'#b8a37b');b(u,1,0,1.6,1.25,1.8,'#a78757');b(u,1,-.92,1.6,.15,.06,'#d7bd85');}b(-1,1.95,0,1.4,.65,1.6,'#b59869');for(const u of[-1,1])b(u,1.3,0,.2,2,1.85,'#cc8647');
+    } else {
+      width=3;depth=3;height=12;
+      for(const u of[-1,1])for(const v of[-1,1])b(u,6,v,.16,12,.16,'#c5c7b1');for(let y=2;y<12;y+=2){b(0,y,0,2.2,.16,2.2,y%4?'#b75f48':'#dfdbc4');const beam=b(0,y-.8,-1,2.8,.1,.1,'#929f8b');beam.rotation.z=.6;}
+      for(const u of[-1,1])b(u*1.3,10,0,.45,2.5,.65,'#e0dec8');b(0,12.2,0,.25,.45,.25,'#c96b4e');
+      const dish=cylinder(parts,x,7,z-1.25,1.7,.22,'#e4ddc6',1.3,8);dish.rotation.x=Math.PI/2;b(.4,.8,0,1.4,1.6,1.2,'#758f7e');
+    }
+    const solid=kind==='containers'||kind==='ramp';
+    const prop=collision(props,id,x,z,Math.max(width,depth)*.44,merge(parts,'detail-'+kind),!solid,kind==='containers'?900:kind==='radio'?500:120,{kind,interaction:solid?'solid':['logs','dumpsters','pallets'].includes(kind)?'movable':'breakable',width,depth,height,mass:kind==='containers'?2000:kind==='logs'?500:250});
+    if(kind==='ramp')prop.mesh.metadata.ramp={direction:0,width,length:depth,height};
+  }
+  function pine(props:WorldProp[],id:string,x:number,z:number,height:number,snow:boolean):void {
+    const parts:Part[]=[];cylinder(parts,x,height*.25,z,.45,height*.5,'#796c52',.33,5);
+    for(let layer=0;layer<3;layer++){
+      cylinder(parts,x,height*(.38+layer*.22),z,height*(.65-layer*.14),height*.52,snow?'#738673':layer%2?'#527951':'#416947',0,5);
+      if(snow)cylinder(parts,x,height*(.5+layer*.22),z,height*(.37-layer*.075),height*.29,'#e3e7dd',0,5);
+    }
+    collision(props,id,x,z,.55,merge(parts,'pine'),true,90,{kind:'pine',height:height*1.1,mass:300});
+  }
+  function crane(props:WorldProp[],visuals:WorldProp[],id:string,x:number,z:number):void {
+    const parts:Part[]=[];
+    for(const side of[-1,1]){box(parts,x+side*7,6,z,.7,12,1.2,'#d5b15c');box(parts,x+side*7,.4,z,2,.8,8,'#556f64');collision(props,id+'-foot-'+side,x+side*7,z,1.1,undefined,false,5000,{kind:'crane-leg',width:2,depth:8,height:12});}
+    box(parts,x,12,z,17,1,1.5,'#dcba69');box(parts,x+3,12.8,z,2.8,1.4,2.8,'#d5c99b');box(parts,x+3,12.9,z-1.45,2.4,.8,.08,'#426e6e');box(parts,x,8,z,.12,8,.12,'#536b60');box(parts,x,4,z,3,.3,1.4,'#556b5e');
+    collision(visuals,id,x,z,9,merge(parts,'port-gantry'),false,5000,{kind:'crane',height:14,mass:50000});
+  }
+  function dock(props:WorldProp[],id:string,x:number,z:number):void {
+    const parts:Part[]=[];
+    box(parts,x,.02,z,25,.08,20,'#4f8190');
+    for(const side of[-1,1]){box(parts,x+side*12.5,.4,z,1,.8,21,'#b8b8a1');box(parts,x,.4,z+side*10,25,.8,1,'#b8b8a1');}
+    for(const u of[-10,-5,0,5,10])for(const side of[-1,1]){cylinder(parts,x+u,.9,z+side*10,.35,1,'#d0ac51',.45,6);box(parts,x+u,.1,z+side*8.9,.65,.35,.3,'#526c62');}
+    // A bounded dock basin is an obstacle, not a drivable painted water patch.
+    const basin=collision(props,id,x,z,12.5,merge(parts,'harbour-basin'),false,9000,{kind:'harbour-basin',width:26,depth:21,height:1,mass:50000});
+    basin.mesh.metadata.waterBounds={centerX:x,centerZ:z,halfWidth:11,halfDepth:8};
+  }
+  type SceneryKit='carwash'|'tire-shop'|'construction'|'rock-arch'|'dry-creek'|'orchard'|'canal-bridge'|'cattle-pen'|'camp'|'lake'|'snow-depot'|'overlook';
+  function snowTunnel(props:WorldProp[],visuals:WorldProp[],id:string,road:RoadSample):void {
+    const parts:Part[]=[],site={x:road.x,z:road.z,rotation:road.angle};
+    const b=(u:number,y:number,v:number,w:number,h:number,d:number,paint:string)=>{const p=localPoint(site,u,v);box(parts,p.x,y,p.z,w,h,d,paint,road.angle);};
+    const half=road.width/2+2;
+    for(const side of[-1,1]){
+      b(side*half,3.1,0,2,6.2,20,'#8e9b93');b(side*half,6.6,0,3,1.4,22,'#b8c4b9');
+      const p=localPoint(site,side*half,0);
+      collision(props,id+'-wall-'+side,p.x,p.z,10,undefined,false,9000,{kind:'tunnel-wall',width:2,depth:20,height:7.3,mass:50000,angle:road.angle});
+      for(const end of[-1,1]){b(side*(half-1.1),2.1,end*10,.15,3.6,.5,'#d5c789');b(side*(half-1.12),3.6,end*9.9,.18,.6,.55,'#dccf9f');}
+    }
+    b(0,6.4,0,half*2+2,.8,20,'#a5b0a5');
+    const p=localPoint(site,0,0);cylinder(parts,p.x,8.5,p.z,half*2+7,3.4,'#9faea3',half*1.8,6).rotation.y=road.angle;cylinder(parts,p.x,10.5,p.z,half*1.9,1.1,'#e0e6dc',half*1.3,6).rotation.y=road.angle;
+    collision(visuals,id,road.x,road.z,15,merge(parts,'snow-road-tunnel'),false,9000,{kind:'snow-tunnel',height:11,mass:50000});
+  }
+  function sceneryKit(background:Part[],props:WorldProp[],visuals:WorldProp[],id:string,x:number,z:number,kind:SceneryKit):void {
+    const parts:Part[]=[];
+    const b=(u:number,y:number,v:number,w:number,h:number,d:number,hex:string)=>box(parts,x+u,y,z+v,w,h,d,hex);
+    const block=(suffix:string,u:number,v:number,w:number,d:number,h:number)=>collision(props,id+'-'+suffix,x+u,z+v,Math.max(w,d)*.45,undefined,false,1800,{kind:'kit-'+kind,width:w,depth:d,height:h,mass:7000});
+    let height=5;
+    if(kind==='carwash'||kind==='tire-shop'||kind==='snow-depot') {
+      const wash=kind==='carwash',snow=kind==='snow-depot';height=snow?7:5;
+      for(const side of[-1,1]){b(side*5,2.3,0,2,4.6,12,wash?'#7aa49a':snow?'#9daea5':'#bdab84');block('wall-'+side,side*5,0,2,12,4.6);}
+      b(0,4.9,0,12.5,.6,12.5,snow?'#e0e5db':'#d6c8a6');b(0,4.3,-6.35,12,.6,.2,wash?'#488e91':snow?'#bd7552':'#b95f44');
+      b(0,.02,0,12,.04,12,'#a7ada1');
+      if(wash)for(const u of[-3.3,3.3]){const brush=cylinder(parts,x+u,1.9,z,1.5,3.8,'#4c8b84',1.5,8);brush.rotation.y=.2;block('brush-'+u,u,0,1.5,1.5,3.8);for(let y=.5;y<3.8;y+=.6)cylinder(parts,x+u,y,z,1.65,.18,'#87b4a2',1.65,8);}
+      else {b(0,2.2,5.8,8,4.4,.4,'#587b72');block('rear',0,5.8,8,.4,4.4);for(const u of[-2,2])b(u,3,5.55,2,1,.08,'#adc6ba');if(snow){pitchedRoof(parts,x,6,z,13,2,13,'#e2e7dc');for(const u of[-3,3]){b(u,.4,-3,1.2,.8,3.2,'#cd9857');block('equipment-'+u,u,-3,1.2,3.2,.8);}}else {for(let n=0;n<3;n++){const tire=cylinder(parts,x-3, .4+n*.5,z-3,1.7,.45,'#354a43',1.7,8);tire.rotation.y=.2;}block('tires',-3,-3,1.7,1.7,1.65);} }
+      lettering(parts,wash?'CAR':'SERVICE',x,4.3,z-6.49,.07,'#efe1b8');
+    } else if(kind==='construction') {
+      height=8;
+      for(const u of[-7,0,7])for(const v of[-5,5]){b(u,3.5,v,.7,7,.7,'#a5aaa0');block('column-'+u+':'+v,u,v,.7,.7,7);}
+      for(const y of[.2,3.6,7])b(0,y,0,15,.35,12,'#b7b8a6');
+      for(const u of[-7,7])b(u,7.5,0,.12,.9,12,'#a77b49');b(0,7.8,-5.8,14,.14,.14,'#a77b49');
+      detailProp(props,id+'-ramp',x,z-10,'ramp');detailProp(props,id+'-pallets',x+10,z+2,'pallets');detailProp(props,id+'-gate',x-10,z-4,'construction-gate');
+    } else if(kind==='rock-arch') {
+      height=10;
+      for(const u of[-5,5]){cylinder(parts,x+u,3.8,z,5,7.6,'#bb906d',3.6,5);block('foot-'+u,u,0,5,5,7.6);}
+      b(0,7.8,0,12,2.5,4.7,'#c7a17b');crown(parts,x,9,z,11,2.6,4.8,'#d3b18a');
+    } else if(kind==='dry-creek'||kind==='canal-bridge'||kind==='lake') {
+      const lake=kind==='lake',dry=kind==='dry-creek';height=2;
+      box(background,x,.015,z,lake?21:6,.035,22,dry?'#ae9a75':'#739ea0');
+      for(const side of[-1,1])box(background,x+side*(lake?11:3.6),.07,z,1,.16,23,dry?'#d2b78c':'#adb59c');
+      // A low drivable crossing, with collision only on the rails and water.
+      b(0,.13,0,lake?23:9,.2,4.8,'#a59774');for(const v of[-2.7,2.7]){b(0,1,v,lake?22:9,.15,.15,'#7b8064');for(const u of[-4,0,4])b(u,.6,v,.13,1.2,.13,'#7b8064');block('rail-'+v,0,v,lake?22:9,.2,1.2);}
+      if(!dry)for(const side of[-1,1])block('water-'+side,0,side*7.4,lake?21:6,9,1);
+    } else if(kind==='orchard') {
+      height=5;
+      box(background,x,-.005,z,24,.04,23,'#8e9b6f');
+      for(const u of[-8,0,8])for(const v of[-7,7]){b(u,1.2,v,.35,2.4,.35,'#877556');crown(parts,x+u,3,z+v,5.5,4,5.5,'#7c965b');for(const k of[-1,1])b(u+k*1.6,3,v-1.8,.5,.5,.5,'#c18947');block('tree-'+u+':'+v,u,v,.7,.7,5);}
+      detailProp(props,id+'-stall',x,z,'market-stall');
+    } else if(kind==='cattle-pen') {
+      height=2;
+      box(background,x,.015,z,21,.03,18,'#b0a77d');
+      for(const side of[-1,1]){fence(props,id+'-fence-x-'+side,x+side*10,z,16,true);fence(props,id+'-fence-z-'+side,x,z+side*8,18);}
+      b(7,.7,4,2,1.4,5,'#82958a');b(7,1.43,4,1.6,.05,4.6,'#789d9c');block('trough',7,4,2,5,1.5);for(const u of[-5,-2,1]){b(u,.6,4,2,1.2,1.6,'#c7af6d');b(u,.6,4,.12,1.3,1.7,'#8f7d4c');block('hay-'+u,u,4,2,1.7,1.3);}
+    } else if(kind==='camp') {
+      height=3;
+      for(const u of[-6,6]){pitchedRoof(parts,x+u,1.3,z,4.8,2.6,5,'#b19d5f');b(u,.05,0,5,.1,5.2,'#887b5e');block('tent-'+u,u,0,4.8,5,2.6);}
+      b(0,.9,5,4,.16,1.8,'#9c865f');block('table',0,5,4,1.8,1);for(const v of[3.6,6.4]){b(0,.5,v,4,.14,.5,'#aa9169');block('bench-'+v,0,v,4,.5,.6);}for(let i=0;i<6;i++)cylinder(parts,x+Math.sin(i*Math.PI/3)*1.3,.2,z-4+Math.cos(i*Math.PI/3)*1.3,.55,.4,'#8b9483',.4,5);
+      b(8,2,-5,.2,4,.2,'#876f50');b(8,3.6,-5,3,.9,.16,'#507d6e');
+    } else {
+      height=3;
+      b(0,.3,0,17,.6,10,'#a9b1a4');for(const side of[-1,1]){b(side*8,1.2,0,.18,1.8,10,'#7b8d80');block('wall-'+side,side*8,0,.2,10,2);}
+      for(const u of[-6,-3,0,3,6]){b(u,1.2,4.8,.13,1.8,.13,'#798b80');b(u,.2,6,2,.4,2,'#dce2d8');}b(0,2.1,4.8,16,.15,.15,'#7b8d80');block('rear-rail',0,4.8,16,.2,2.2);b(0,1.2,2,4,.12,1,'#927d60');block('bench',0,2,4,1,1.3);
+    }
+    if(parts.length)collision(visuals,id,x,z,14,merge(parts,'scenery-'+kind),false,6000,{kind:'scenery-'+kind,interaction:'solid',height,mass:50000});
+  }
+  function expansionScenery(meshes:Part[],props:WorldProp[],visuals:WorldProp[],id:string,x:number,z:number,biome:Biome):void {
+    const r=random((hash(Math.round(x),Math.round(z),seed+1907)*2147483647)|0);
+    const free=(px:number,pz:number,radius:number)=>clearSpace(px,pz,radius)&&props.every(p=>Math.hypot(p.x-px,p.z-pz)>p.radius+radius+1);
+    const sites=[[-18,-18],[18,18],[-18,18],[18,-18]];
+    if(biome==='city') {
+      // Small usable sidewalk details; never block a junction or a parking entry.
+      const road=roadAt(x,z),side=r()<.5?-1:1;
+      for(let n=0;n<2;n++){const px=road.x+Math.cos(road.angle)*side*(road.width/2+4.5)+Math.sin(road.angle)*(n*9-4),pz=road.z-Math.sin(road.angle)*side*(road.width/2+4.5)+Math.cos(road.angle)*(n*9-4);
+        if(owned(px,pz,Math.round(x/CHUNK),Math.round(z/CHUNK))&&free(px,pz,n===0?3:1))detailProp(props,id+'-street-kit-'+n,px,pz,n===0?'bus-stop':'charger');}
+      for(const [u,v]of sites)if(free(x+u,z+v,3)){detailProp(props,id+'-sidewalk-detail',x+u,z+v,r()<.5?'dumpsters':'market-stall');break;}
+      return;
+    }
+    if(biome==='snow'&&hash(Math.round(x),Math.round(z),seed+2432)<.28){const road=roadAt(x,z);if(road.width>=10&&road.distance<22&&owned(road.x,road.z,Math.round(x/CHUNK),Math.round(z/CHUNK))&&!nearbyDistrict(road.x,road.z))snowTunnel(props,visuals,id+'-tunnel',road);}
+    const choices:Record<Exclude<Biome,'city'>,Landmark[]>={desert:['diner','motel','solar','water-tower'],fields:['greenhouse','silos','market'],port:['warehouse','warehouse','water-tower'],forest:['sawmill','cabin','lookout'],snow:['chalet','lift','chalet']};
+    const choice=choices[biome][Math.floor(r()*choices[biome].length)];
+    if(biome==='port'&&r()<.38)for(const [u,v]of sites){if(free(x+u,z+v,15)){dock(props,id+'-dock',x+u,z+v);break;}}
+    if(biome==='snow'&&r()<.32)for(const [u,v]of sites){if(free(x+u,z+v,12)){
+      const rock:Part[]=[];
+      cylinder(rock,x+u,4.5,z+v,19,9,'#8a9792',9,5);cylinder(rock,x+u-1,10,z+v,10,7,'#dce3dc',.6,5);
+      collision(props,id+'-snow-peak',x+u,z+v,9.5,merge(rock,'snow-peak'),false,9000,{kind:'snow-peak',width:19,depth:19,height:14,mass:50000});break;
+    }}
+    const large=choice==='warehouse'||choice==='sawmill'||choice==='greenhouse'||choice==='motel'||choice==='solar'||choice==='lift';
+    if(r()<(biome==='port'?.95:biome==='snow'?.7:.52))for(const [u,v]of sites){if(free(x+u,z+v,large?14:9)){landmark(props,id+'-landmark',x+u,z+v,choice);break;}}
+    const kits:Record<Exclude<Biome,'city'>,SceneryKit[]>={desert:['rock-arch','dry-creek','tire-shop'],fields:['orchard','canal-bridge','cattle-pen'],port:['construction','tire-shop'],forest:['camp','lake','camp'],snow:['snow-depot','overlook','overlook']};
+    if(hash(Math.round(x),Math.round(z),seed+2410)<.48)for(const[u,v]of sites){if(free(x+u,z+v,15)){const pool=kits[biome];sceneryKit(meshes,props,visuals,id+'-kit',x+u,z+v,pool[Math.floor(hash(Math.round(x),Math.round(z),seed+2411)*pool.length)]);break;}}
+    if(biome==='port') {
+      for(let n=0;n<sites.length;n++){const [u,v]=sites[n];if(free(x+u,z+v,7))detailProp(props,id+'-cargo-'+n,x+u,z+v,'containers');}
+      if(free(x,z,13))crane(props,visuals,id+'-gantry',x,z);
+      // Loading aprons and rail spurs are flat geometry in the ground batch.
+      for(const [u,v]of sites)if(clearSpace(x+u,z+v,12)){box(meshes,x+u,.015,z+v,24,.04,24,'#b7b8a4');for(const side of[-1,1])box(meshes,x+u+side*.8,.06,z+v,.1,.08,23,'#718475');for(let t=-10;t<=10;t+=2.2)box(meshes,x+u,.045,z+v+t,2.3,.08,.25,'#8a8e7c');}
+    }
+    if(biome==='forest'||biome==='snow') {
+      // Three compact groves leave open clearings and readable routes between
+      // them. Taller layered crowns read as forest at the driving camera.
+      const count=biome==='forest'?21:9;
+      for(let n=0;n<count;n++){const grove=sites[n%3],angle=n*2.399,spread=3+(n%7)*1.5,px=x+grove[0]*.85+Math.sin(angle)*spread,pz=z+grove[1]*.85+Math.cos(angle)*spread;if(free(px,pz,2.5))pine(props,id+'-pine-'+n,px,pz,(biome==='forest'?9:7)+r()*4,biome==='snow');}
+      for(let n=0;n<3;n++){const px=x+(r()-.5)*55,pz=z+(r()-.5)*55;if(!free(px,pz,3.5))continue;const rock:Part[]=[];crown(rock,px,1.2,pz,5,3,4,'#8e9b91',r()*3);if(biome==='snow')crown(rock,px,2.05,pz,4.4,1.6,3.6,'#dde4db',r()*3);collision(props,id+'-boulder-'+n,px,pz,2.2,merge(rock,'biome-boulder'),false,1500,{kind:'rock',height:3,mass:8000});}
+    }
+    for(let n=0;n<2;n++){if(biome==='desert'&&(n>0||r()>.13))continue;const px=x+(r()-.5)*44,pz=z+(r()-.5)*44;if(free(px,pz,biome==='snow'?6:4))detailProp(props,id+'-detail-'+n,px,pz,biome==='forest'?'logs':biome==='snow'?'snow-fence':biome==='port'?(n?'pallets':'charger'):biome==='fields'?(n?'market-stall':'logs'):'radio');}
   }
 
   function createChunk(cx: number, cz: number): Chunk {
@@ -961,7 +1288,32 @@ export function createWorld(scene: Scene, seed: number): World {
     roads(meshes, props, x, z);
     for (const site of garages) if (owned(site.x, site.z, cx, cz)) placeGarage(meshes, props, site,visuals);
     const town = nearbyDistrict(x, z);
-    if (town) {
+    if(town&&biome==='port') {
+      for(const ox of[-76,-24,24,76])for(const oz of[-76,-24,24,76]) {
+        const bx=town.x+ox,bz=town.z+oz;
+        if(!owned(bx,bz,cx,cz)||garages.some(g=>Math.hypot(g.x-bx,g.z-bz)<27))continue;
+        const lotId=town.id+'-port-lot-'+ox+':'+oz;
+        const lot=parkingLots(town).find(p=>p.x===bx&&p.z===bz);
+        if(lot){placeParking(meshes,lot);continue;}
+        if(!clearSpace(bx,bz,14))continue;
+        const style=hash(Math.round(bx),Math.round(bz),seed+1920);
+        box(meshes,bx,.015,bz,36,.04,36,'#b8b8a2');
+        if(style<.47) {
+          landmark(props,lotId+'-warehouse',bx,bz,'warehouse');
+          for(const side of[-1,1])themedObject(props,lotId+'-loading-'+side,bx+side*7,bz-11.3,'crates');
+          detailProp(props,lotId+'-charger',bx+14,bz+5,'charger');
+        } else if(style<.66) {
+          dock(props,lotId+'-dock',bx,bz);
+          for(const side of[-1,1])themedObject(props,lotId+'-quay-crates-'+side,bx+side*8,bz+12.5,'crates');
+        } else {
+          // Four stacks fill a cargo yard while preserving a central aisle.
+          for(const u of[-6,6])for(const v of[-8,8])detailProp(props,lotId+'-stack-'+u+':'+v,bx+u,bz+v,'containers');
+          crane(props,visuals,lotId+'-crane',bx,bz);
+        }
+        // Loading markings are baked into the apron, not new objects.
+        for(const u of[-13,0,13])box(meshes,bx+u,.05,bz-16,5,.02,.17,'#e4d8aa');
+      }
+    } else if (town && biome==='city') {
       const palette = ['#d4c7ad', '#c7bca6', '#cdbba3', '#b8c5b8', '#c4b59b', '#c7bcae'];
       for (const ox of [-76, -24, 24, 76]) for (const oz of [-76, -24, 24, 76]) {
         const bx = town.x + ox, bz = town.z + oz;
@@ -986,7 +1338,8 @@ export function createWorld(scene: Scene, seed: number): World {
         } else if (kind > 0.79 && Math.abs(ox) > 40) {
           if (clearSpace(bx, bz, 14)) {
             forecourt(meshes,bx,bz,Math.abs(ox)>40?45:35,Math.abs(oz)>40?45:35);
-            building(meshes, props, lotId, bx, bz, 23, 20, 5.2, '#b4b8a9', lr);
+            if(kind>.9)landmark(props,lotId,bx,bz,'warehouse');
+            else sceneryKit(meshes,props,visuals,lotId,bx,bz,kind>.86?'construction':kind>.83?'carwash':'tire-shop');
             if(clearSpace(bx+16,bz+5,3))themedObject(props,lotId+'-container',bx+16,bz+5,'container',Math.PI/2);
             for(const side of[-1,1])if(clearSpace(bx+side*7,bz-13,1.2))themedObject(props,lotId+'-barrel-'+side,bx+side*7,bz-13,'barrel');
             if(clearSpace(bx-15,bz+6,1.5))themedObject(props,lotId+'-crates',bx-15,bz+6,'crates');
@@ -1034,11 +1387,17 @@ export function createWorld(scene: Scene, seed: number): World {
         const w = 21 + r() * 15, d = 26 + r() * 18;
         const points: Point[] = [];
         for (const [u,v] of [[-0.5,-0.35],[-0.35,-0.5],[0.45,-0.5],[0.5,0.3],[0.3,0.5],[-0.5,0.45]]) points.push({x:px+c*u*w+s*v*d,z:pz-s*u*w+c*v*d});
-        polygon(meshes, points, -0.025, r() < 0.5 ? '#a39b68' : '#a7ad74');
+        const soilColor = r() < 0.5 ? '#a39b68' : '#a7ad74';
+        const cropKind = Math.floor(hash(cx,cz,seed+613) * 3);
+        polygon(meshes, points, -0.025, cropKind === 2 ? '#998368' : soilColor);
         soilPatches.get(id)!.push(points);
         for (let row = -w / 2 + 3; row < w / 2 - 2; row += 2.5) {
           const rx=px+c*row,rz=pz-s*row;
-          if(clearSpace(rx,rz,Math.hypot(.7,d*.76)/2))box(meshes, rx, 0.1, rz, 0.7, 0.22, d * 0.76, row % 5 < 2.5 ? '#7d9559' : '#899d61', angle);
+          const alternate = Math.floor((row+w/2)/2.5)%2 === 0;
+          const cropColors = cropKind === 1 ? ['#c7b474','#ae975e'] : cropKind === 2 ? ['#879969','#a3ad7d'] : ['#7d9559','#899d61'];
+          const rowHeight = cropKind === 1 ? .34 : cropKind === 2 ? .13 : .22;
+          // Green beds, ripe grain and harvested strips use the same row count.
+          if(clearSpace(rx,rz,Math.hypot(1.1,d*.76)/2))box(meshes, rx, rowHeight/2-.01, rz, cropKind === 2 ? 1.1 : .7, rowHeight, d * (cropKind === 2 && alternate ? .57 : .76), cropColors[alternate?0:1], angle);
         }
         if (r() < 0.3 && clearSpace(px,pz-d*.55,6)) fence(props, id + '-field-fence', px, pz - d * 0.55, 11);
         for(const side of[-1,1])if(clearSpace(px+side*w*.3,pz+d*.5,1.2))themedObject(props,id+'-field-hay-'+side,px+side*w*.3,pz+d*.5,'hay',angle);
@@ -1072,9 +1431,16 @@ export function createWorld(scene: Scene, seed: number): World {
       if (r() < 0.23 && clearSpace(px, pz, 14)) {
         // Stepped mesas and their smaller broken shelves give the desert a silhouette.
         const rock:Part[]=[];
-        cylinder(rock, px, 1.1, pz, 24, 2.2, '#bb926e', 20, 6).rotation.y = 0.2;
-        cylinder(rock, px - 1.1, 3.4, pz + 0.8, 19, 2.7, '#c49b73', 14, 6).rotation.y = 0.2;
-        cylinder(rock, px - 1.3, 4.9, pz + 1, 14, 0.4, '#d3b086', 13.5, 6).rotation.y = 0.2;
+        const rockKind = Math.floor(hash(cx,cz,seed+614)*3);
+        cylinder(rock, px, 1.1, pz, 24, 2.2, rockKind === 2 ? '#b3896d' : '#bb926e', 20, 6).rotation.y = 0.2;
+        if(rockKind === 1) {
+          // Split summits preserve the broad obstacle footprint and triangle count.
+          cylinder(rock,px-4.1,3.5,pz+.8,9,2.7,'#c49b73',5.3,6).rotation.y=.2;
+          cylinder(rock,px+4.0,3.05,pz-1.3,10,2.0,'#d3b086',6.2,6).rotation.y=-.25;
+        } else {
+          cylinder(rock, px - 1.1, 3.4, pz + 0.8, rockKind === 2 ? 17 : 19, 2.7, '#c49b73', rockKind === 2 ? 12 : 14, 6).rotation.y = rockKind === 2 ? .55 : .2;
+          cylinder(rock, px - 1.3, 4.9, pz + 1, rockKind === 2 ? 15 : 14, 0.4, '#d3b086', rockKind === 2 ? 14.7 : 13.5, 6).rotation.y = .2;
+        }
         collision(props, id + '-mesa', px, pz, 11,merge(rock,'mesa'),false,1800,{kind:'rock',height:5.2,mass:50000});
         for (let i = 0; i < 3; i++) {
           const rx=px+12+i*2,rz=pz-6+i*4;
@@ -1087,9 +1453,17 @@ export function createWorld(scene: Scene, seed: number): World {
         const tx = px + (r() - 0.5) * 24, tz = pz + (r() - 0.5) * 24;
         if (!clearSpace(tx, tz, 2)) continue;
         const pieces: Part[] = [], h = 2.5 + r() * 1.6;
-        cylinder(pieces, tx, h / 2, tz, 0.6, h, '#779776', 0.48, 5);
-        box(pieces, tx + 0.7, h * 0.54, tz, 1.3, 0.38, 0.4, '#779776');
-        cylinder(pieces, tx + 1.2, h * 0.7, tz, 0.4, h * 0.4, '#779776', 0.35, 5);
+        const cactusKind=hash(Math.round(tx),Math.round(tz),seed+615);
+        if(cactusKind<.3) {
+          cylinder(pieces,tx,h*.18,tz,1.15,h*.36,'#83956c',.6,5);
+          cylinder(pieces,tx+.5,h*.1,tz+.2,.62,h*.2,'#708866',.3,5);
+          box(pieces,tx,.16+h*.36,tz,.28,.24,.28,'#d1b57d');
+        } else {
+          const side=cactusKind<.65?-1:1;
+          cylinder(pieces, tx, h / 2, tz, 0.6, h, '#779776', 0.48, 5);
+          box(pieces, tx + side*.7, h * 0.54, tz, 1.3, 0.38, 0.4, '#779776');
+          cylinder(pieces, tx + side*1.2, h * 0.7, tz, 0.4, h * 0.4, '#779776', 0.35, 5);
+        }
         collision(props, id + '-cactus-' + i, tx, tz, 0.65, merge(pieces, 'cactus'), true, 28);
       }
       if(r()<.13&&clearSpace(x-15,z-13,5)) {
@@ -1106,18 +1480,26 @@ export function createWorld(scene: Scene, seed: number): World {
       const end = a.points[2], before = a.points[1];
       const angle = Math.atan2(end.x - before.x, end.z - before.z);
       const bx = end.x + Math.cos(angle) * 12, bz = end.z - Math.sin(angle) * 12;
+      if(biomeAt(bx,bz)!=='fields'&&biomeAt(bx,bz)!=='desert')continue;
       if (!owned(bx, bz, cx, cz) || !clearSpace(bx, bz, 5)) continue;
       const barn:Part[]=[];
-      box(barn, bx, 2.4, bz, 10, 4.8, 9, biomeAt(bx,bz)==='desert' ? '#c7a181' : '#ba8065');
-      cylinder(barn, bx, 5.1, bz, 13, 2, '#d3b191', 1, 4).rotation.y = Math.PI / 4;
+      const barnKind = Math.floor(hash(Math.round(bx),Math.round(bz),seed+616)*3);
+      box(barn, bx, 2.4, bz, 10, 4.8, 9, biomeAt(bx,bz)==='desert' ? '#c7a181' : barnKind===1 ? '#8c9d89' : '#ba8065');
+      if(barnKind===0) cylinder(barn, bx, 5.1, bz, 13, 2, '#d3b191', 1, 4).rotation.y = Math.PI / 4;
+      else pitchedRoof(barn,bx,5.34,bz,10.7,1.48,9.6,barnKind===1?'#596f65':'#9c8269');
       box(barn, bx, 1.6, bz - 4.55, 3.5, 3.2, 0.14, '#d8d4b7');
+      box(barn,bx,1.6,bz-4.64,.09,3.2,.05,'#776f57');
+      box(barn,bx,3.3,bz-4.64,3.9,.16,.2,'#6b715d');
+      for(const side of[-1,1])box(barn,bx+side*3.75,2.85,bz-4.56,1.3,.8,.12,'#506a61');
       collision(props, 'farm-' + a.id, bx, bz, 5,merge(barn,'farm-barn'),true,400,{kind:'small-building',height:6.1,mass:3000,width:10,depth:9});
       for(const side of[-1,1])themedObject(props,'farm-'+a.id+'-hay-'+side,bx+side*7,bz+2,'hay');
       themedObject(props,'farm-'+a.id+'-gate',end.x,end.z,'gate',angle);
     }
+    expansionScenery(meshes,props,visuals,id,x,z,biome);
     const mesh = merge(meshes, 'world-chunk-' + id);
     mesh.metadata = { worldChunk: true, biome, roadHierarchy: true, parkingLots: town ? parkingLots(town).filter(lot=>owned(lot.x,lot.z,cx,cz)).map(lot=>({id:lot.id,x:lot.x,z:lot.z,rotation:lot.rotation,width:lot.width,depth:lot.depth,entrance:lot.entrance,street:lot.street})) : [] };
-    shadow?.addShadowCaster(mesh, false);
+    // The ground batch contains roads, paving and surface detail; none needs to
+    // be submitted again as a shadow caster.
     return { x: cx, z: cz, mesh, props,visuals };
   }
 
@@ -1132,24 +1514,28 @@ export function createWorld(scene: Scene, seed: number): World {
   function update(x: number, z: number, dt = 1 / 60): void {
     if (disposed) return;
     interactions.update(dt, x, z);
-    ensureGarages(x, z);
     const cx = Math.round(x / CHUNK);
     const cz = Math.round(z / CHUNK);
+    if(cx!==streamX||cz!==streamZ){
+    streamX=cx;streamZ=cz;ensureGarages(x,z);
     for (const [key, chunk] of chunks) {
       if (Math.abs(chunk.x - cx) > 3 || Math.abs(chunk.z - cz) > 3) {
         dropChunk(chunk);
         chunks.delete(key);
       }
     }
-    const pending: { cx: number; cz: number; distance: number }[] = [];
+    pendingChunks=[];
     for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
       const tx = cx + dx;
       const tz = cz + dz;
-      if (!chunks.has(tx + ':' + tz)) pending.push({ cx: tx, cz: tz, distance: dx * dx + dz * dz });
+      if (!chunks.has(tx + ':' + tz)) pendingChunks.push({ cx: tx, cz: tz, distance: dx * dx + dz * dz });
     }
-    pending.sort((a, b) => a.distance - b.distance);
+    pendingChunks.sort((a, b) => a.distance - b.distance);
+    }
+    if(!pendingChunks.length)return;
     const buildStarted = performance.now();
-    for (const next of pending.slice(0, 2)) {
+    for (let built=0;built<2&&pendingChunks.length;built++) {
+      const next=pendingChunks.shift()!;
       chunks.set(next.cx + ':' + next.cz, createChunk(next.cx, next.cz));
       if (performance.now() - buildStarted > 7) break;
     }
@@ -1158,7 +1544,7 @@ export function createWorld(scene: Scene, seed: number): World {
     const result: WorldProp[] = [];
     for (const chunk of chunks.values()) {
       if (Math.abs(chunk.x * CHUNK - x) > radius + HALF + 36 || Math.abs(chunk.z * CHUNK - z) > radius + HALF + 36) continue;
-      for (const prop of chunk.props) if (prop.active && Math.hypot(prop.x - x, prop.z - z) < radius + prop.radius) result.push(prop);
+      for (const prop of chunk.props) if (prop.active && (prop.x-x)**2+(prop.z-z)**2 < (radius+prop.radius)**2) result.push(prop);
     }
     return result;
   }

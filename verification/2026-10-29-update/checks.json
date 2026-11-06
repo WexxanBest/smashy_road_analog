@@ -1,0 +1,37 @@
+{
+  "date": "2026-10-29",
+  "implementation": {
+    "playerCars": 10,
+    "civilianAndServiceModels": 12,
+    "policeGroundVariants": 8,
+    "helicopterVariants": 2,
+    "biomes": ["city", "desert", "fields", "port", "forest", "snow"],
+    "pickupKinds": 7
+  },
+  "validation": {
+    "npmTest": {"passed": 45, "failed": 0},
+    "typescriptAndProductionBuild": "passed",
+    "gitDiffCheck": "passed",
+    "browser": [
+      "Garage filters: All 10, Owned 1, New 3; arrows cycle filtered models",
+      "Car arrows hidden in Tuning; disabled when only one model matches",
+      "390x844 portrait: full vehicle visible, no horizontal page overflow",
+      "Police APC, camper and mixer inspected; APC compact model remains one mesh",
+      "Port, forest and snow scenery visually reviewed",
+      "Helicopter crash: falling -> impact, exactly five semantic debris parts",
+      "Seven pickup models load in a real drive without console errors",
+      "Car explosion phases reviewed with production effect renderer"
+    ]
+  },
+  "renderBudgets": {
+    "particlePool": 240,
+    "simultaneousExplosionSequences": 8,
+    "particleBatches": 4,
+    "particleMaterials": 2,
+    "physicalDebrisGlobalLimit": 32,
+    "carFragmentsPerEmission": 6,
+    "helicopterFragments": 5,
+    "worldGeometryAudit": "../world-expansion-after.json",
+    "note": "Resource budgets and geometry counts are not a guarantee of GPU frame rate on every device."
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "completedOn": "2026-11-06",
+  "implementation": {"playerCars":10,"civilianAndService":12,"policeGround":9,"helicopters":2,"patrolBoatModels":1,"maxActiveBoats":2,"biomes":6,"pickups":12},
+  "validation": {"testsPassed":55,"testsFailed":0,"typescript":"passed","productionBuild":"passed","diffCheck":"passed"},
+  "browser": ["Magnet collects cash from 10m","EMP and drone timers activate on pickup","Smoke screen forms continuous faceted cloud","Spikes deploy behind player","Boat spawns in port water, rocket locks and two hits destroy it","Pause mouse button opens modal","Restart confirmation can be cancelled","Quality selection applies immediately","390px pause menu has no horizontal overflow"],
+  "performance": {"scenario":"Fixed seed 42 city, 8 police, 12 traffic, 2 helicopters, 8 parked vehicles; 5s warmup and 20s measurement","viewport":[1280,720],"beforeFps":31,"afterFps":50.6,"beforeFrameP95Ms":44.5,"afterFrameP95Ms":28.3,"beforeMeanDrawCalls":1002.81,"afterMeanDrawCalls":274.24,"afterQuality":"balanced, full internal resolution; 768 shadow map refreshed every second frame and culled to camera vicinity","note":"Local browser sample, not a guarantee for all hardware, biomes or moving chases. Separate CPU world audit uses NullEngine. ShadowCpuMs counter in browser report did not consistently capture shadow passes; use total frame time and draw calls."}
+}
